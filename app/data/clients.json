@@ -1,0 +1,8 @@
+[
+  {"id": "internal_pitch", "label": "Internal Pitch", "type": "internal"},
+  {"id": "shiseido",       "label": "Shiseido",       "type": "external"},
+  {"id": "unilever",       "label": "Unilever",       "type": "external"},
+  {"id": "pg",             "label": "P&G",            "type": "external"},
+  {"id": "nestle",         "label": "Nestle",         "type": "external"},
+  {"id": "bread",          "label": "Bread (demo)",   "type": "demo"}
+]

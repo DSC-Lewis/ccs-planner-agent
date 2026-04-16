@@ -1,0 +1,16 @@
+{
+  "criteria": [
+    {"id": "net_reach",          "label": "Net Reach",          "unit": "%",      "default": true},
+    {"id": "attentive_reach",    "label": "Attentive Reach",    "unit": "%"},
+    {"id": "engagement_reach",   "label": "Engagement Reach",   "unit": "%"},
+    {"id": "impressions",        "label": "Impressions",        "unit": "count"},
+    {"id": "attitude_measures",  "label": "Attitude Measures",  "unit": "%"},
+    {"id": "brand_consideration","label": "Brand Consideration","unit": "%"}
+  ],
+  "strategies": [
+    {"id": "global_plan", "label": "Global Plan", "description": "\u7d71\u4e00\u5206\u914d\u7e3d\u9810\u7b97\u81f3\u6240\u6709 channel",    "default": true},
+    {"id": "per_channel", "label": "Per Channel", "description": "\u6bcf\u500b channel \u7368\u7acb\u512a\u5316\uff0c\u4e0d\u5206\u4eab\u9810\u7b97"},
+    {"id": "per_week",    "label": "Per Week",    "description": "\u6bcf\u9031\u7368\u7acb\u512a\u5316\uff0cflighting \u53ef\u5438\u63db"}
+  ],
+  "frequency_thresholds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+}

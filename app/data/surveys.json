@@ -1,0 +1,22 @@
+[
+  {
+    "id": "tw_2023",
+    "label": "Taiwan 2023",
+    "wave": "CCS 2023 - W1 - Taiwan - Chinese",
+    "year": 2023,
+    "deprecated": true
+  },
+  {
+    "id": "tw_2024",
+    "label": "Taiwan 2024",
+    "wave": "CCS 2024 - W1 - Taiwan - Chinese",
+    "year": 2024
+  },
+  {
+    "id": "tw_2025",
+    "label": "Taiwan 2025",
+    "wave": "CCS 2025 - W1 - Taiwan - Chinese",
+    "year": 2025,
+    "is_default": true
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "all_adults",
+    "name": "All adults",
+    "source": "CCS Taiwan 2025",
+    "survey_id": "tw_2025",
+    "sample": 5045,
+    "universe_000": 19002,
+    "base_pct": 100.00,
+    "is_default": true
+  },
+  {
+    "id": "ambitious_trendsetters_ccs",
+    "name": "Ambitious Trendsetters ccs",
+    "source": "CCS Taiwan 2025",
+    "survey_id": "tw_2025",
+    "sample": 802,
+    "universe_000": 2609,
+    "base_pct": 13.73
+  },
+  {
+    "id": "ta_30_54_a",
+    "name": "TA 30-54 A",
+    "source": "CCS Taiwan 2025",
+    "survey_id": "tw_2025",
+    "sample": 2465,
+    "universe_000": 8844,
+    "base_pct": 46.54
+  },
+  {
+    "id": "ambitious_face",
+    "name": "\u6709\u5099\u800c\u4f86\u7684\u5f62\u8c61\u6d3e",
+    "source": "CCS 2023 - W1 - Taiwan - Chinese",
+    "survey_id": "tw_2023",
+    "sample": 802,
+    "universe_000": 0,
+    "base_pct": 0.00,
+    "warning": "802 ID(s) not found in survey data"
+  },
+  {
+    "id": "female_25_44",
+    "name": "Female 25-44",
+    "source": "CCS Taiwan 2025",
+    "survey_id": "tw_2025",
+    "sample": 1820,
+    "universe_000": 6500,
+    "base_pct": 34.21
+  },
+  {
+    "id": "gen_z_18_24",
+    "name": "Gen Z 18-24",
+    "source": "CCS Taiwan 2025",
+    "survey_id": "tw_2025",
+    "sample": 540,
+    "universe_000": 1950,
+    "base_pct": 10.26
+  }
+]

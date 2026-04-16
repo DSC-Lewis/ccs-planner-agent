@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CCS Planner · Briefing Agent</title>
+<link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="logo">DENTSU<span>•</span>CONNECT <span class="dim">/ CCS Planner · Briefing Agent</span></div>
+    <div class="mode-switch" role="tablist" aria-label="Agent mode">
+      <button id="btnManual" class="active" data-mode="manual">Manual Agent</button>
+      <button id="btnAuto" data-mode="automatic">Automatic Agent</button>
+    </div>
+    <button class="reset" id="btnReset" title="Start a new session">↺ 重新開始</button>
+  </header>
+
+  <aside class="sidebar">
+    <div class="side-title">Workflow</div>
+    <div id="steps"></div>
+    <div class="meta">
+      <b id="modeLabel">Manual Mode</b><br/>
+      以對話協助 PM / Planner 修改 Brief。<br/>
+      所有狀態同步到後端，重新整理不遺失。
+    </div>
+    <div class="api-indicator" id="apiIndicator">API: <span id="apiStatus">checking…</span></div>
+  </aside>
+
+  <main class="chat">
+    <div class="chat-scroll" id="scroll"></div>
+    <div class="composer">
+      <span class="hint">小提示：<span class="kbd">/skip</span> 跳過 · <span class="kbd">/back</span> 上一題 · <span class="kbd">/show</span> 顯示摘要</span>
+      <input id="input" placeholder="輸入回覆… (按 Enter 送出)" autocomplete="off" />
+      <button id="send">Send</button>
+    </div>
+  </main>
+
+  <aside class="summary" id="summary">
+    <div class="sum-hd">
+      <b>Brief Summary</b>
+      <span class="pill mode-manual" id="modePill">Manual</span>
+    </div>
+    <div class="sum-body" id="sumBody"></div>
+  </aside>
+</div>
+<script src="/assets/app.js"></script>
+</body>
+</html>

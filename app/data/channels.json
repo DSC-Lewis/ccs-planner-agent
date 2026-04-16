@@ -1,0 +1,95 @@
+{
+  "groups": [
+    {
+      "id": "aggregated_channels",
+      "label": "Aggregated Channels",
+      "children": [
+        {"id": "video_mix",    "label": "Video - Mix"},
+        {"id": "banners_mix",  "label": "Banners - Mix"},
+        {"id": "social_mix",   "label": "Social - Mix"},
+        {"id": "outdoor_mix",  "label": "Outdoor - Mix"}
+      ]
+    },
+    {
+      "id": "tv_cinema",
+      "label": "TV & Cinema",
+      "children": [
+        {"id": "tv_advertising",       "label": "TV advertising"},
+        {"id": "tv_program_sponsorship","label": "TV program sponsorship"},
+        {"id": "ott_product_placement","label": "OTT Product Placement"},
+        {"id": "avod_ads",             "label": "AVOD Ads"},
+        {"id": "cinema_ads",           "label": "Cinema ads"},
+        {"id": "sponsorship_of_movies","label": "Sponsorship of movies"}
+      ]
+    },
+    {
+      "id": "online_video",
+      "label": "Online Video",
+      "children": [
+        {"id": "online_video_display", "label": "Online video display ads"},
+        {"id": "mobile_video_ads",     "label": "Mobile Video Ads"},
+        {"id": "youtube_video_ads",    "label": "YouTube - video ads"},
+        {"id": "viral_youtube",        "label": "Viral YouTube"},
+        {"id": "meta_video_ads",       "label": "Meta Video Ads"},
+        {"id": "facebook_video_ads",   "label": "Facebook - video ads"},
+        {"id": "instagram_video_ads",  "label": "Instagram - video ads"}
+      ]
+    },
+    {
+      "id": "digital_mobile",
+      "label": "Digital & Mobile",
+      "children": [
+        {"id": "display_ads",  "label": "Display ads"},
+        {"id": "search_ads",   "label": "Search ads"},
+        {"id": "native_ads",   "label": "Native ads"}
+      ]
+    },
+    {
+      "id": "social",
+      "label": "Social",
+      "children": [
+        {"id": "facebook_posts",  "label": "Facebook posts"},
+        {"id": "instagram_posts", "label": "Instagram posts"},
+        {"id": "line_official",   "label": "LINE official"}
+      ]
+    },
+    {
+      "id": "audio",
+      "label": "Audio",
+      "children": [
+        {"id": "radio_advertising", "label": "Radio advertising"},
+        {"id": "podcast_ads",       "label": "Podcast ads"}
+      ]
+    },
+    {
+      "id": "ooh",
+      "label": "OOH",
+      "children": [
+        {"id": "billboards", "label": "Billboards"},
+        {"id": "transit",    "label": "Transit"}
+      ]
+    },
+    {
+      "id": "dooh",
+      "label": "DOOH",
+      "children": [
+        {"id": "dooh_screens", "label": "DOOH screens"}
+      ]
+    },
+    {
+      "id": "print",
+      "label": "Print",
+      "children": [
+        {"id": "newspaper_ads", "label": "Newspaper ads"},
+        {"id": "magazine_ads",  "label": "Magazine ads"}
+      ]
+    },
+    {
+      "id": "gaming",
+      "label": "Gaming",
+      "children": [
+        {"id": "in_game_ads", "label": "In-game ads"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[
+  {"id": "attitude_measures",    "label": "Attitude Measures",     "category": "attitude"},
+  {"id": "brand_awareness",      "label": "Brand Awareness",       "category": "awareness"},
+  {"id": "brand_consideration",  "label": "Brand Consideration",   "category": "consideration"},
+  {"id": "brand_image_scores",   "label": "Brand Image Scores",    "category": "image"},
+  {"id": "brand_knowledge_scores","label": "Brand Knowledge Scores","category": "knowledge"},
+  {"id": "brand_preference",     "label": "Brand Preference",      "category": "preference"},
+  {"id": "purchase_intent",      "label": "Purchase Intent",       "category": "intent"},
+  {"id": "nps",                  "label": "Net Promoter Score",    "category": "advocacy"}
+]

@@ -1,0 +1,250 @@
+{
+  "tv_advertising": {
+    "category": "TV & Cinema",
+    "cpm_twd": 83.14,
+    "penetration_pct": 46.57,
+    "attention_pct": 54.77,
+    "engagement_pct": 47.96,
+    "buying_type": "Bought"
+  },
+  "tv_program_sponsorship": {
+    "category": "TV & Cinema",
+    "cpm_twd": 120.0,
+    "penetration_pct": 45.2,
+    "attention_pct": 62.5,
+    "engagement_pct": 44.0,
+    "buying_type": "Bought"
+  },
+  "ott_product_placement": {
+    "category": "TV & Cinema",
+    "cpm_twd": 180.0,
+    "penetration_pct": 29.58,
+    "attention_pct": 68.0,
+    "engagement_pct": 52.0,
+    "buying_type": "Bought"
+  },
+  "avod_ads": {
+    "category": "TV & Cinema",
+    "cpm_twd": 95.0,
+    "penetration_pct": 29.53,
+    "attention_pct": 59.0,
+    "engagement_pct": 48.5,
+    "buying_type": "Bought"
+  },
+  "cinema_ads": {
+    "category": "TV & Cinema",
+    "cpm_twd": 210.0,
+    "penetration_pct": 2.37,
+    "attention_pct": 72.0,
+    "engagement_pct": 40.0,
+    "buying_type": "Bought"
+  },
+  "sponsorship_of_movies": {
+    "category": "TV & Cinema",
+    "cpm_twd": 260.0,
+    "penetration_pct": 8.5,
+    "attention_pct": 70.0,
+    "engagement_pct": 38.0,
+    "buying_type": "Bought"
+  },
+  "online_video_display": {
+    "category": "Online Video",
+    "cpm_twd": 55.0,
+    "penetration_pct": 73.19,
+    "attention_pct": 48.0,
+    "engagement_pct": 44.0,
+    "buying_type": "Bought"
+  },
+  "mobile_video_ads": {
+    "category": "Online Video",
+    "cpm_twd": 48.0,
+    "penetration_pct": 80.78,
+    "attention_pct": 52.0,
+    "engagement_pct": 53.0,
+    "buying_type": "Bought"
+  },
+  "youtube_video_ads": {
+    "category": "Online Video",
+    "cpm_twd": 166.27,
+    "penetration_pct": 73.19,
+    "attention_pct": 67.81,
+    "engagement_pct": 65.19,
+    "buying_type": "Bought"
+  },
+  "viral_youtube": {
+    "category": "Online Video",
+    "cpm_twd": 320.0,
+    "penetration_pct": 28.0,
+    "attention_pct": 75.0,
+    "engagement_pct": 70.0,
+    "buying_type": "Bought"
+  },
+  "meta_video_ads": {
+    "category": "Online Video",
+    "cpm_twd": 41.57,
+    "penetration_pct": 81.86,
+    "attention_pct": 57.65,
+    "engagement_pct": 54.26,
+    "buying_type": "Bought"
+  },
+  "facebook_video_ads": {
+    "category": "Online Video",
+    "cpm_twd": 39.1,
+    "penetration_pct": 81.86,
+    "attention_pct": 50.4,
+    "engagement_pct": 52.1,
+    "buying_type": "Bought"
+  },
+  "instagram_video_ads": {
+    "category": "Online Video",
+    "cpm_twd": 45.8,
+    "penetration_pct": 81.86,
+    "attention_pct": 55.1,
+    "engagement_pct": 58.6,
+    "buying_type": "Bought"
+  },
+  "display_ads": {
+    "category": "Digital & Mobile",
+    "cpm_twd": 22.0,
+    "penetration_pct": 86.56,
+    "attention_pct": 32.0,
+    "engagement_pct": 28.0,
+    "buying_type": "Bought"
+  },
+  "search_ads": {
+    "category": "Digital & Mobile",
+    "cpm_twd": 28.0,
+    "penetration_pct": 85.4,
+    "attention_pct": 45.0,
+    "engagement_pct": 55.0,
+    "buying_type": "Bought"
+  },
+  "native_ads": {
+    "category": "Digital & Mobile",
+    "cpm_twd": 32.0,
+    "penetration_pct": 37.71,
+    "attention_pct": 42.0,
+    "engagement_pct": 48.0,
+    "buying_type": "Bought"
+  },
+  "facebook_posts": {
+    "category": "Social",
+    "cpm_twd": 15.0,
+    "penetration_pct": 81.86,
+    "attention_pct": 38.0,
+    "engagement_pct": 45.0,
+    "buying_type": "Owned"
+  },
+  "instagram_posts": {
+    "category": "Social",
+    "cpm_twd": 18.0,
+    "penetration_pct": 81.86,
+    "attention_pct": 42.0,
+    "engagement_pct": 50.0,
+    "buying_type": "Owned"
+  },
+  "line_official": {
+    "category": "Social",
+    "cpm_twd": 12.0,
+    "penetration_pct": 68.79,
+    "attention_pct": 40.0,
+    "engagement_pct": 48.0,
+    "buying_type": "Owned"
+  },
+  "radio_advertising": {
+    "category": "Audio",
+    "cpm_twd": 38.5,
+    "penetration_pct": 22.26,
+    "attention_pct": 41.0,
+    "engagement_pct": 30.0,
+    "buying_type": "Bought"
+  },
+  "podcast_ads": {
+    "category": "Audio",
+    "cpm_twd": 52.0,
+    "penetration_pct": 10.73,
+    "attention_pct": 58.0,
+    "engagement_pct": 44.0,
+    "buying_type": "Bought"
+  },
+  "billboards": {
+    "category": "OOH",
+    "cpm_twd": 25.4,
+    "penetration_pct": 29.32,
+    "attention_pct": 35.0,
+    "engagement_pct": 20.0,
+    "buying_type": "Bought"
+  },
+  "transit": {
+    "category": "OOH",
+    "cpm_twd": 20.0,
+    "penetration_pct": 34.14,
+    "attention_pct": 38.0,
+    "engagement_pct": 22.0,
+    "buying_type": "Bought"
+  },
+  "dooh_screens": {
+    "category": "DOOH",
+    "cpm_twd": 45.0,
+    "penetration_pct": 31.56,
+    "attention_pct": 48.0,
+    "engagement_pct": 30.0,
+    "buying_type": "Bought"
+  },
+  "newspaper_ads": {
+    "category": "Print",
+    "cpm_twd": 68.0,
+    "penetration_pct": 38.88,
+    "attention_pct": 44.0,
+    "engagement_pct": 28.0,
+    "buying_type": "Bought"
+  },
+  "magazine_ads": {
+    "category": "Print",
+    "cpm_twd": 92.0,
+    "penetration_pct": 16.82,
+    "attention_pct": 52.0,
+    "engagement_pct": 36.0,
+    "buying_type": "Bought"
+  },
+  "in_game_ads": {
+    "category": "Gaming",
+    "cpm_twd": 58.0,
+    "penetration_pct": 53.13,
+    "attention_pct": 62.0,
+    "engagement_pct": 55.0,
+    "buying_type": "Bought"
+  },
+  "video_mix": {
+    "category": "Aggregated",
+    "cpm_twd": 72.0,
+    "penetration_pct": 70.9,
+    "attention_pct": 56.0,
+    "engagement_pct": 52.0,
+    "buying_type": "Bought"
+  },
+  "banners_mix": {
+    "category": "Aggregated",
+    "cpm_twd": 24.0,
+    "penetration_pct": 85.4,
+    "attention_pct": 34.0,
+    "engagement_pct": 30.0,
+    "buying_type": "Bought"
+  },
+  "social_mix": {
+    "category": "Aggregated",
+    "cpm_twd": 16.0,
+    "penetration_pct": 81.86,
+    "attention_pct": 40.0,
+    "engagement_pct": 48.0,
+    "buying_type": "Owned"
+  },
+  "outdoor_mix": {
+    "category": "Aggregated",
+    "cpm_twd": 28.0,
+    "penetration_pct": 34.14,
+    "attention_pct": 36.0,
+    "engagement_pct": 22.0,
+    "buying_type": "Bought"
+  }
+}

@@ -1,0 +1,21 @@
+services:
+  ccs-agent:
+    build: .
+    image: ccs-planner-agent:latest
+    container_name: ccs-planner-agent
+    restart: unless-stopped
+    ports:
+      - "${CCS_PORT:-8000}:8000"
+    environment:
+      CCS_STORAGE_PATH: /data/storage.json
+      CCS_CORS_ORIGINS: "${CCS_CORS_ORIGINS:-*}"
+    volumes:
+      - ccs_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ccs_data:
