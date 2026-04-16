@@ -1,0 +1,12 @@
+# Copy to ~/.ccs-deploy-env and `source` it before running deploy/*.sh
+export GCP_PROJECT=nvidia-test-410101
+export VM_NAME=instance-20260416-224642
+export VM_ZONE=us-central1-a
+
+# Firewall source range. Leave 0.0.0.0/0 for open internet, or tighten
+# e.g. TWTPE-43F office CIDR:   SRC_RANGES=xxx.xxx.xxx.0/24
+export SRC_RANGES=0.0.0.0/0
+
+# Admin key for the app. Generate once:  openssl rand -hex 24
+# Store here for convenience; don't commit this file.
+export CCS_ADMIN_KEY=<RUN_OPENSSL_RAND_HEX_24_AND_PASTE_HERE>
