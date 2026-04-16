@@ -60,6 +60,32 @@ def test_create_session_with_explicit_project(client):
     assert len(sessions) == 1
 
 
+def test_cross_user_cannot_inject_someone_elses_project_id(client):
+    """Code-review #3: even if Bob guesses Alice's project_id, he must not
+    be able to create a session in it. Defence-in-depth — the existing
+    POST /api/sessions check already enforces this; we lock the behaviour
+    down with a test so future refactors can't regress it."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.services import storage
+
+    alice_proj = client.post("/api/projects", json={"name": "Alice-only"}).json()
+
+    storage.ensure_admin(name="eve", api_key="eve-key")
+    eve = TestClient(app)
+    eve.headers.update({"X-API-Key": "eve-key"})
+
+    r = eve.post("/api/sessions",
+                 json={"mode": "manual", "project_id": alice_proj["id"]})
+    assert r.status_code == 404, (
+        "Eve should not be able to attach a session to Alice's project."
+    )
+
+    # Verify Alice's project still has zero sessions.
+    detail = client.get(f"/api/projects/{alice_proj['id']}").json()
+    assert detail["session_count"] == 0
+
+
 def test_project_detail_has_session_and_plan_counts(client):
     proj = client.post("/api/projects", json={"name": "Counts"}).json()
     client.post("/api/sessions", json={"mode": "manual", "project_id": proj["id"]})

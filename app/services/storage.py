@@ -362,13 +362,6 @@ def get_session(session_id: str, *, owner_id: Optional[str] = None) -> Optional[
     return _session_from_row(row) if row else None
 
 
-def get_session_owner(session_id: str) -> Optional[str]:
-    row = _conn().execute(
-        "SELECT owner_id FROM sessions WHERE id = ?", (session_id,)
-    ).fetchone()
-    return row["owner_id"] if row else None
-
-
 def list_sessions(*, owner_id: str, project_id: Optional[str] = None) -> List[AgentSession]:
     if project_id:
         rows = _conn().execute(
@@ -557,8 +550,10 @@ def import_legacy_json() -> int:
     data = json.loads(STORAGE_PATH.read_text(encoding="utf-8"))
 
     # Every orphaned row lands under a "legacy" user + its default project.
+    # The key is random so no one logs in as this user; downgrade to
+    # non-admin so the semantics are honest (code-review #2).
     legacy = get_user_by_name("legacy") or create_user(
-        name="legacy", api_key=secrets.token_hex(16), is_admin=True,
+        name="legacy", api_key=secrets.token_hex(16), is_admin=False,
     )
     proj = ensure_default_project(legacy.id)
 

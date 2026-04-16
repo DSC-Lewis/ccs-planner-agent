@@ -8,6 +8,7 @@ layer, not just the HTTP layer (NFR-5.2).
 from __future__ import annotations
 
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
@@ -52,6 +53,18 @@ class ForkSessionRequest(BaseModel):
     project_id: Optional[str] = None
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Replaces the deprecated @app.on_event pattern. Runs schema init +
+    admin bootstrap at startup."""
+    storage.init_schema()
+    storage.auto_migrate_legacy_if_empty()
+    if ADMIN_KEY:
+        storage.ensure_admin(name="admin", api_key=ADMIN_KEY)
+    yield
+    # Nothing to clean up on shutdown.
+
+
 app = FastAPI(
     title="CCS Planner · Conversational Agent",
     version=__version__,
@@ -60,6 +73,7 @@ app = FastAPI(
         "conversational Agent with Manual and Automatic modes. v4 adds Projects, "
         "per-user auth, and full conversation history."
     ),
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -71,18 +85,6 @@ app.add_middleware(
 )
 app.add_middleware(APIKeyMiddleware)
 app.add_middleware(RateLimitMiddleware)
-
-
-# ---------- Startup ----------
-
-@app.on_event("startup")
-def _startup() -> None:
-    storage.init_schema()
-    # Best-effort import of the pre-v4 storage.json, idempotent.
-    storage.auto_migrate_legacy_if_empty()
-    # Bootstrap admin user from env key (CCS_ADMIN_KEY or legacy CCS_API_KEY).
-    if ADMIN_KEY:
-        storage.ensure_admin(name="admin", api_key=ADMIN_KEY)
 
 
 # ---------- Auth dependency ----------
@@ -336,7 +338,22 @@ def compare_plans(plan_ids: List[str], user: User = Depends(current_user)):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": __version__}
+    """Liveness + shallow DB readiness probe.
+
+    Returns 503 when the SQLite backend is unreachable so a load balancer
+    can route traffic away from a broken node instead of happily claiming
+    liveness while every user-facing request errors out."""
+    from fastapi.responses import JSONResponse
+    try:
+        # Cheapest possible probe — counts are index-only lookups.
+        storage._count("sessions")
+        db_state = "ok"
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "version": __version__, "db": "error"},
+        )
+    return {"status": "ok", "version": __version__, "db": db_state}
 
 
 # ---------- Static frontend ----------

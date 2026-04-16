@@ -133,6 +133,31 @@ def test_migration_from_legacy_json_is_idempotent(monkeypatch, tmp_path):
     assert n2 == 0, f"second run should be a no-op, got {n2}"
 
 
+def test_legacy_import_creates_non_admin_owner(monkeypatch, tmp_path):
+    """Code-review #2: a migrated "legacy" user should not get admin rights.
+    The key is random so there's no realistic abuse path, but semantically
+    imported historical data shouldn't grant elevated privileges."""
+    import json as _json
+    legacy = tmp_path / "storage.json"
+    legacy.write_text(_json.dumps({"sessions": {}, "plans": {}}))
+
+    monkeypatch.setenv("CCS_DATABASE_PATH", str(tmp_path / "ccs.db"))
+    monkeypatch.setenv("CCS_STORAGE_PATH", str(legacy))
+    import app.config
+    import app.services.storage as store
+    importlib.reload(app.config)
+    importlib.reload(store)
+    store.init_schema()
+    # Import even an empty file just to materialise the user.
+    store.import_legacy_json()
+
+    owner = store.get_user_by_name("legacy")
+    assert owner is not None
+    assert owner.is_admin is False, (
+        "Imported legacy user should not carry admin rights."
+    )
+
+
 def test_parametrised_queries_reject_injection(monkeypatch, tmp_path):
     """NFR-5.1 — no f-string SQL. A name full of SQL shouldn't delete tables."""
     store = _fresh_store(monkeypatch, tmp_path)
