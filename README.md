@@ -151,6 +151,27 @@ Automatic: same Brief → 6,000,000 total budget → TV + Meta Mandatory /
            YouTube Optional → no Min/Max → global net-reach optimization
 ```
 
+## Plan Comparison (v3)
+
+Once two or more plans exist against a Brief, the Review step shows a
+**Compare plans ▶** button that opens a picker (checkbox list of saved
+plans) and renders a full comparison view:
+
+| Chart | What it shows |
+|---|---|
+| Performance summary (grouped bar) | Reach / attentive / engagement / frequency × 10 / brand consideration across plans |
+| Budget per channel (stacked horizontal bar) | Where each plan spends |
+| Reach metrics (grouped bar) | Net reach + Attitude + Consideration + Knowledge |
+| Frequency distribution (line) | Reach at 1+ … 10+ exposures (derived via `optimizer.frequency_distribution`) |
+| Weekly GRP trend (line) | Week-by-week roll-up (`optimizer.weekly_grp`) |
+
+Plus a **Duplication & Exclusivity** table per plan (from
+`optimizer.duplication_matrix`).
+
+Chart.js 4 is loaded lazily from jsDelivr on first Compare click. If the
+CDN is blocked (air-gapped install, firewall) the tables still render and
+the user sees a "charts unavailable" notice.
+
 ## Security
 
 The [security review](docs/) drove a TDD pass (see `docs/TDD.md`). Current

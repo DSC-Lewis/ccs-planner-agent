@@ -189,14 +189,25 @@ def compare_plans(plan_ids: List[str]):
     plans = [p for p in plans if p]
     if len(plans) < 2:
         raise HTTPException(400, "Need at least 2 valid plan ids to compare.")
+
+    # Augment each plan with the chart-friendly derived data (FR-12).
+    # Kept out of the base Plan schema so the /api/plans/{id} endpoint stays
+    # fast; the comparison view is the only caller that needs this much.
+    def _augment(plan) -> dict:
+        d = plan.model_dump()
+        d["frequency_distribution"] = optimizer.frequency_distribution(plan)
+        d["duplication"]            = optimizer.duplication_matrix(plan)
+        d["weekly_grp"]             = optimizer.weekly_grp(plan)
+        return d
+
     return {
-        "plans": [p.model_dump() for p in plans],
+        "plans": [_augment(p) for p in plans],
         "delta": {
-            "total_budget_twd": plans[1].summary.total_budget_twd - plans[0].summary.total_budget_twd,
-            "net_reach_pct":    plans[1].summary.net_reach_pct   - plans[0].summary.net_reach_pct,
-            "frequency":        plans[1].summary.frequency       - plans[0].summary.frequency,
+            "total_budget_twd":  plans[1].summary.total_budget_twd  - plans[0].summary.total_budget_twd,
+            "net_reach_pct":     plans[1].summary.net_reach_pct     - plans[0].summary.net_reach_pct,
+            "frequency":         plans[1].summary.frequency         - plans[0].summary.frequency,
             "total_impressions": plans[1].summary.total_impressions - plans[0].summary.total_impressions,
-        }
+        },
     }
 
 
