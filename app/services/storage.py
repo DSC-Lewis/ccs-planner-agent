@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS users (
     name        TEXT NOT NULL,
     api_key_hash TEXT NOT NULL UNIQUE,
     is_admin    INTEGER NOT NULL DEFAULT 0,
+    is_active   INTEGER NOT NULL DEFAULT 1,
     created_at  REAL NOT NULL
 );
 
@@ -162,6 +163,12 @@ def init_schema() -> None:
         row = cur.fetchone()
         if row is None:
             c.execute("INSERT INTO schema_version(version) VALUES (?);", (_SCHEMA_VERSION,))
+        # v5 additive migration: ensure `is_active` exists on pre-v5 DBs.
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()]
+        if "is_active" not in cols:
+            c.execute(
+                "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;"
+            )
 
 
 def auto_migrate_legacy_if_empty() -> int:
@@ -203,11 +210,14 @@ def create_user(name: str, api_key: str, is_admin: bool = False) -> User:
 
 
 def get_user_by_api_key(api_key: str) -> Optional[User]:
+    """Look up an active user by their plaintext key. Disabled (is_active=0)
+    users are treated as non-existent — a revoked key immediately stops
+    authenticating without needing a server restart (NFR-6.2)."""
     if not api_key:
         return None
     c = _conn()
     row = c.execute(
-        "SELECT * FROM users WHERE api_key_hash = ? LIMIT 1",
+        "SELECT * FROM users WHERE api_key_hash = ? AND is_active = 1 LIMIT 1",
         (_hash_key(api_key),),
     ).fetchone()
     return _user_from_row(row) if row else None
@@ -225,8 +235,43 @@ def get_user_by_name(name: str) -> Optional[User]:
     return _user_from_row(row) if row else None
 
 
+def list_users() -> List[User]:
+    rows = _conn().execute(
+        "SELECT * FROM users ORDER BY created_at ASC"
+    ).fetchall()
+    return [_user_from_row(r) for r in rows]
+
+
+def set_user_active(user_id: str, active: bool) -> bool:
+    """Enable or disable a user. Returns True if a row was updated."""
+    cur = _conn().execute(
+        "UPDATE users SET is_active = ? WHERE id = ?",
+        (1 if active else 0, user_id),
+    )
+    return cur.rowcount > 0
+
+
+def rotate_user_key(user_id: str, new_key: str) -> bool:
+    """Replace a user's key hash. Returns True if the user exists."""
+    cur = _conn().execute(
+        "UPDATE users SET api_key_hash = ? WHERE id = ?",
+        (_hash_key(new_key), user_id),
+    )
+    return cur.rowcount > 0
+
+
 def _user_from_row(row: sqlite3.Row) -> User:
-    return User(id=row["id"], name=row["name"], is_admin=bool(row["is_admin"]),
+    # ``is_active`` may be absent on DBs migrated from pre-v5; the column
+    # always exists after ``init_schema`` but the row might still be NULL
+    # during a rolling upgrade.
+    is_active = True
+    try:
+        is_active = bool(row["is_active"])
+    except (IndexError, KeyError):
+        is_active = True
+    return User(id=row["id"], name=row["name"],
+                is_admin=bool(row["is_admin"]),
+                is_active=is_active,
                 created_at=row["created_at"])
 
 

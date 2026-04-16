@@ -1366,6 +1366,130 @@ async function renderHistory(sessionId) {
   } catch (err) { showError(err); }
 }
 
+/* ---------- Users tab (v5, admin-only) ---------- */
+
+async function renderUsers() {
+  // Guard: only admins should see this. The backend enforces is_admin
+  // regardless, so failing open here would just show 403-messages, but it's
+  // cleaner to bail early.
+  const me = await api.me().catch(() => null);
+  if (!me || !me.is_admin) {
+    botSay("⚠️ Users 管理僅限 admin。");
+    return;
+  }
+
+  scroll.innerHTML = "";
+  const msg = botSay("👥 <b>Users</b> — 管理帳號與 API key");
+
+  const card = el("div", { class: "card compare-view full" });
+
+  // Invite-user form
+  const row = el("div", { style: "display:flex;gap:8px;margin-bottom:10px" });
+  const nameInp = el("input", { id: "new-user-name", placeholder: "new user name",
+    style: "flex:1;border:1px solid #E5E7EB;border-radius:8px;padding:8px 10px;font:inherit" });
+  const adminChk = el("label", { style: "display:inline-flex;align-items:center;gap:6px;font-size:13px" },
+    el("input", { type: "checkbox", id: "new-user-admin" }), "admin");
+  const inviteBtn = el("button", {
+    style: "padding:8px 14px;border-radius:999px;border:0;background:#111827;color:#fff;cursor:pointer",
+    onclick: async () => {
+      const name = nameInp.value.trim();
+      if (!name) return;
+      try {
+        const body = { name, is_admin: document.getElementById("new-user-admin").checked };
+        const res = await apiFetch("/api/users", { method: "POST", body: JSON.stringify(body) });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        _showOneTimeKey(data.user.name, data.api_key);
+        renderUsers();
+      } catch (e) { showError(e); }
+    }
+  }, "+ Invite user");
+  row.append(nameInp, adminChk, inviteBtn);
+  card.append(row);
+
+  // Users table
+  try {
+    const users = await apiFetch("/api/users").then(r => r.json());
+    const tbl = el("table", { class: "tbl" });
+    tbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Name"), el("th", {}, "Role"), el("th", {}, "Active"),
+      el("th", {}, "Created"), el("th", {}, "Actions"))));
+    const body = el("tbody", {});
+    users.forEach(u => {
+      const created = new Date(u.created_at * 1000).toLocaleDateString();
+      const roleTag = el("span", { class: "tag " + (u.is_admin ? "green" : "") },
+        u.is_admin ? "admin" : "user");
+      const activeTag = el("span", { class: "tag " + (u.is_active ? "green" : "red") },
+        u.is_active ? "active" : "disabled");
+
+      const actions = el("div", { style: "display:flex;gap:6px" });
+      if (u.id !== me.id) {
+        const toggleBtn = el("button", {
+          style: "padding:3px 8px;border-radius:6px;border:1px solid #E5E7EB;background:#fff;cursor:pointer;font-size:12px",
+          onclick: async () => {
+            try {
+              // Using literal URL paths (not a computed suffix) so they
+              // appear in greppable form for static-analysis tests.
+              const url = u.is_active
+                ? `/api/users/${u.id}/disable`
+                : `/api/users/${u.id}/enable`;
+              const r = await apiFetch(url, { method: "POST" });
+              if (!r.ok) throw new Error(await r.text());
+              renderUsers();
+            } catch (e) { showError(e); }
+          }
+        }, u.is_active ? "Disable" : "Enable");
+        actions.append(toggleBtn);
+      }
+      const rotateBtn = el("button", {
+        style: "padding:3px 8px;border-radius:6px;border:1px solid #E5E7EB;background:#fff;cursor:pointer;font-size:12px",
+        onclick: async () => {
+          if (!confirm(`Rotate key for ${u.name}? Their current key will stop working immediately.`)) return;
+          try {
+            const r = await apiFetch(`/api/users/${u.id}/rotate`, { method: "POST" });
+            if (!r.ok) throw new Error(await r.text());
+            const data = await r.json();
+            _showOneTimeKey(u.name, data.api_key, "rotated");
+          } catch (e) { showError(e); }
+        }
+      }, "Rotate key");
+      actions.append(rotateBtn);
+
+      body.append(el("tr", {},
+        el("td", {}, u.name),
+        el("td", {}, roleTag),
+        el("td", {}, activeTag),
+        el("td", {}, created),
+        el("td", {}, actions)
+      ));
+    });
+    tbl.append(body);
+    card.append(tbl);
+  } catch (err) { showError(err); }
+
+  msg.append(card);
+}
+
+function _showOneTimeKey(name, key, action = "created") {
+  const backdrop = el("div", { class: "modal-backdrop" });
+  const modal = el("div", { class: "modal" });
+  const body = el("div", { class: "body" },
+    el("div", { class: "note" }, `One-time key for ${name} (${action}) — copy now, you won't see it again.`),
+    el("pre", { class: "code", style: "user-select:all" })
+  );
+  body.querySelector("pre").textContent = key;
+  const close = () => backdrop.remove();
+  const copyBtn = el("button", { class: "primary",
+    onclick: () => { navigator.clipboard.writeText(key); copyBtn.textContent = "Copied ✓"; } }, "Copy");
+  modal.append(
+    el("header", {}, el("b", {}, "🔑 API key"), el("button", { onclick: close }, "✕")),
+    body,
+    el("div", { class: "foot" }, copyBtn, el("button", { onclick: close }, "Done"))
+  );
+  backdrop.append(modal);
+  document.body.append(backdrop);
+}
+
 /* ---------- Boot (v4) ---------- */
 
 async function bootApp() {
@@ -1377,6 +1501,9 @@ async function bootApp() {
   if (!getApiKey()) { showLoginPrompt(); return; }
   const me = await api.me().catch(() => null);
   if (!me) { setApiKey(""); showLoginPrompt(); return; }
+  // Reveal the 👥 Users button only for admins (v5).
+  const usersBtn = document.getElementById("btnUsers");
+  if (usersBtn) usersBtn.style.display = me.is_admin ? "" : "none";
   botSay(`👋 Hi <b>${escapeHTML(me.name)}</b>${me.is_admin ? " (admin)" : ""} — 載入專案…`);
   renderProjects();
 }
@@ -1387,6 +1514,7 @@ document.addEventListener("click", (e) => {
   if (!(t instanceof HTMLElement)) return;
   if (t.id === "btnHome") { renderProjects(); }
   if (t.id === "btnHistory") { renderHistory(); }
+  if (t.id === "btnUsers") { renderUsers(); }
   if (t.id === "btnLogout") { setApiKey(""); bootApp(); }
 });
 
