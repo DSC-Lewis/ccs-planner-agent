@@ -10,6 +10,8 @@ Living design artefacts for `ccs-planner-agent`.
 | [`TDD_v2.md`](TDD_v2.md) | Iteration 2 test suites TS-11..TS-13. |
 | [`PRD_v3.md`](PRD_v3.md) | **Iteration 3** · Plan Comparison UI with Chart.js + freq distribution + duplication matrix (FR-10..14, NFR-4). |
 | [`TDD_v3.md`](TDD_v3.md) | Iteration 3 test suites TS-14..TS-17. |
+| [`PRD_v4.md`](PRD_v4.md) | **Iteration 4** · Multi-tenant persistence — SQLite, Users, Projects, Conversation log (FR-15..21, NFR-5). |
+| [`TDD_v4.md`](TDD_v4.md) | Iteration 4 test suites TS-18..TS-23. |
 
 Both are versioned with the code. When you add a feature:
 
@@ -40,3 +42,9 @@ Both are versioned with the code. When you add a feature:
 | FR-11 | TS-15 | [`tests/test_duplication_matrix.py`](../tests/test_duplication_matrix.py) |
 | FR-12 | TS-16 | [`tests/test_compare_endpoint.py`](../tests/test_compare_endpoint.py) |
 | FR-13, FR-14, NFR-4 | TS-17 | [`tests/test_compare_ui.py`](../tests/test_compare_ui.py) |
+| FR-20, NFR-5.1, 5.3 | TS-18 | [`tests/test_sqlite_storage.py`](../tests/test_sqlite_storage.py) |
+| FR-17, FR-18 | TS-19 | [`tests/test_projects.py`](../tests/test_projects.py) |
+| FR-19, NFR-5.4 | TS-20 | [`tests/test_conversations.py`](../tests/test_conversations.py) |
+| FR-15, NFR-5.2 | TS-21 | [`tests/test_users.py`](../tests/test_users.py) |
+| FR-16 | TS-22 | [`tests/test_admin_bootstrap.py`](../tests/test_admin_bootstrap.py) |
+| FR-21 | TS-23 | [`tests/test_frontend_shell.py`](../tests/test_frontend_shell.py) |

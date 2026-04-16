@@ -5,39 +5,39 @@ from app.schemas import SessionMode, StepPayload
 from app.services import agent, storage
 
 
-def _build_plan(mode: SessionMode, weeks: int = 4) -> str:
+def _build_plan(owner_id: str, mode: SessionMode, weeks: int = 4) -> str:
     """Drive a full session and return the saved plan_id."""
-    s = agent.create_session(mode)
-    s = agent.advance(s, StepPayload(survey_id="tw_2025", client_id="internal_pitch"))
-    s = agent.advance(s, StepPayload(project_name="compare-test",
-                                     start_date="2026-02-16", weeks=weeks))
-    s = agent.advance(s, StepPayload(target_ids=["all_adults"]))
-    s = agent.advance(s, StepPayload(planning_type="Reach"))
-    s = agent.advance(s, StepPayload(channel_ids=[
-        "tv_advertising", "youtube_video_ads", "meta_video_ads",
-    ]))
+    s = agent.create_session(mode, owner_id=owner_id)
+
+    def adv(payload):
+        return agent.advance(s, payload, owner_id=owner_id)
+
+    s = adv(StepPayload(survey_id="tw_2025", client_id="internal_pitch"))
+    s = adv(StepPayload(project_name="compare-test", start_date="2026-02-16", weeks=weeks))
+    s = adv(StepPayload(target_ids=["all_adults"]))
+    s = adv(StepPayload(planning_type="Reach"))
+    s = adv(StepPayload(channel_ids=["tv_advertising", "youtube_video_ads", "meta_video_ads"]))
     if mode == SessionMode.MANUAL:
-        s = agent.advance(s, StepPayload())  # calibration
-        s = agent.advance(s, StepPayload(weekly_budgets={
+        s = adv(StepPayload())  # calibration
+        s = adv(StepPayload(weekly_budgets={
             "tv_advertising": [2500] * weeks,
             "youtube_video_ads": [125000] * weeks,
             "meta_video_ads": [100000] * weeks,
         }))
     else:
-        s = agent.advance(s, StepPayload(
-            criterion_id="net_reach", strategy_id="global_plan"))
-        s = agent.advance(s, StepPayload(
+        s = adv(StepPayload(criterion_id="net_reach", strategy_id="global_plan"))
+        s = adv(StepPayload(
             total_budget_twd=6_000_000,
             mandatory_channel_ids=["tv_advertising", "meta_video_ads"],
             optional_channel_ids=["youtube_video_ads"]))
-        s = agent.advance(s, StepPayload(constraints={}))
-        s = agent.advance(s, StepPayload())  # optimize
+        s = adv(StepPayload(constraints={}))
+        s = adv(StepPayload())  # optimize
     return s.plan_id
 
 
-def test_compare_includes_frequency_distribution(client):
-    p1 = _build_plan(SessionMode.MANUAL)
-    p2 = _build_plan(SessionMode.AUTOMATIC)
+def test_compare_includes_frequency_distribution(client, owner_id):
+    p1 = _build_plan(owner_id, SessionMode.MANUAL)
+    p2 = _build_plan(owner_id, SessionMode.AUTOMATIC)
     r = client.post("/api/plans/compare", json=[p1, p2])
     assert r.status_code == 200
     body = r.json()
@@ -48,9 +48,9 @@ def test_compare_includes_frequency_distribution(client):
         assert {"threshold", "reach_pct"} <= set(fd[0].keys())
 
 
-def test_compare_includes_duplication(client):
-    p1 = _build_plan(SessionMode.MANUAL)
-    p2 = _build_plan(SessionMode.AUTOMATIC)
+def test_compare_includes_duplication(client, owner_id):
+    p1 = _build_plan(owner_id, SessionMode.MANUAL)
+    p2 = _build_plan(owner_id, SessionMode.AUTOMATIC)
     r = client.post("/api/plans/compare", json=[p1, p2])
     body = r.json()
     for plan in body["plans"]:
@@ -61,9 +61,9 @@ def test_compare_includes_duplication(client):
         assert ids.issubset(dup.keys())
 
 
-def test_compare_includes_weekly_grp(client):
-    p1 = _build_plan(SessionMode.MANUAL)
-    p2 = _build_plan(SessionMode.AUTOMATIC)
+def test_compare_includes_weekly_grp(client, owner_id):
+    p1 = _build_plan(owner_id, SessionMode.MANUAL)
+    p2 = _build_plan(owner_id, SessionMode.AUTOMATIC)
     r = client.post("/api/plans/compare", json=[p1, p2])
     body = r.json()
     for plan in body["plans"]:
@@ -73,9 +73,9 @@ def test_compare_includes_weekly_grp(client):
             assert set(row.keys()) == {"week", "grp"}
 
 
-def test_compare_preserves_legacy_fields(client):
-    p1 = _build_plan(SessionMode.MANUAL)
-    p2 = _build_plan(SessionMode.AUTOMATIC)
+def test_compare_preserves_legacy_fields(client, owner_id):
+    p1 = _build_plan(owner_id, SessionMode.MANUAL)
+    p2 = _build_plan(owner_id, SessionMode.AUTOMATIC)
     r = client.post("/api/plans/compare", json=[p1, p2])
     body = r.json()
     assert "plans" in body
@@ -85,7 +85,7 @@ def test_compare_preserves_legacy_fields(client):
     }
 
 
-def test_compare_requires_two_plans(client):
-    p1 = _build_plan(SessionMode.MANUAL)
+def test_compare_requires_two_plans(client, owner_id):
+    p1 = _build_plan(owner_id, SessionMode.MANUAL)
     r = client.post("/api/plans/compare", json=[p1])
     assert r.status_code == 400

@@ -151,6 +151,42 @@ Automatic: same Brief → 6,000,000 total budget → TV + Meta Mandatory /
            YouTube Optional → no Min/Max → global net-reach optimization
 ```
 
+## Multi-tenant persistence (v4)
+
+| Capability | Env | Default |
+|---|---|---|
+| Admin bootstrap key | `CCS_ADMIN_KEY` (or legacy `CCS_API_KEY`) | empty |
+| SQLite database path | `CCS_DATABASE_PATH` | `./app/var/ccs.db` |
+| Session TTL | `CCS_SESSION_TTL_SECONDS` | 7 days |
+
+- **Users** — every call carries an `X-API-Key`. The key is looked up
+  (hashed `sha256`) in the `users` table. Admin users call `POST /api/users`
+  to mint keys for others; the key is returned exactly once.
+- **Projects** — every user has a `Default` project plus any they create.
+  `GET /api/projects` lists only theirs. `DELETE` soft-archives.
+- **Sessions** — `POST /api/sessions` accepts `project_id`; missing = default.
+- **Conversations (option C)** — every `/advance` call appends a
+  `ConversationTurn` with the **full** brief snapshot, payload, and the
+  server-rendered prompt. `GET /api/sessions/{id}/conversation` replays.
+- **Migration** — on first boot the legacy `storage.json` (v1..v3) is
+  imported into SQLite idempotently (rerun safe).
+
+Admin flow to onboard a teammate:
+
+```bash
+# 1. ship env with a random admin key
+export CCS_ADMIN_KEY="$(openssl rand -hex 24)"
+./run.sh
+
+# 2. as admin, mint a key for Bob
+curl -sX POST http://localhost:8000/api/users \
+     -H "X-API-Key: $CCS_ADMIN_KEY" -H "Content-Type: application/json" \
+     -d '{"name":"bob"}' | jq .
+# { "user": {...}, "api_key": "one-time-token", "note": "Store this key NOW" }
+
+# 3. Bob logs into the UI with that key
+```
+
 ## Plan Comparison (v3)
 
 Once two or more plans exist against a Brief, the Review step shows a

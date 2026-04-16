@@ -1,8 +1,4 @@
-"""TS-1 · Input length / magnitude caps (NFR-1.3).
-
-Prevents runaway JSON payloads and numeric overflow downstream in the
-optimizer.
-"""
+"""TS-1 · Input length / magnitude caps (NFR-1.3)."""
 from __future__ import annotations
 
 import pytest
@@ -11,49 +7,49 @@ from app.schemas import SessionMode, StepPayload
 from app.services import agent
 
 
-def _seed_to_project_step():
-    s = agent.create_session(SessionMode.MANUAL)
+def _seed_to_project_step(owner_id):
+    s = agent.create_session(SessionMode.MANUAL, owner_id=owner_id)
     return agent.advance(
-        s, StepPayload(survey_id="tw_2025", client_id="internal_pitch")
+        s, StepPayload(survey_id="tw_2025", client_id="internal_pitch"),
+        owner_id=owner_id,
     )
 
 
-def _seed_to_channels_step():
-    s = _seed_to_project_step()
+def _seed_to_channels_step(owner_id):
+    s = _seed_to_project_step(owner_id)
     s = agent.advance(
-        s, StepPayload(project_name="cap tests", start_date="2026-02-16", weeks=4)
+        s, StepPayload(project_name="cap tests", start_date="2026-02-16", weeks=4),
+        owner_id=owner_id,
     )
-    s = agent.advance(s, StepPayload(target_ids=["all_adults"]))
-    return agent.advance(s, StepPayload(planning_type="Reach"))
+    s = agent.advance(s, StepPayload(target_ids=["all_adults"]), owner_id=owner_id)
+    return agent.advance(s, StepPayload(planning_type="Reach"), owner_id=owner_id)
 
 
-def _seed_to_manual_plan():
-    s = _seed_to_channels_step()
-    s = agent.advance(s, StepPayload(channel_ids=["tv_advertising", "meta_video_ads"]))
-    return agent.advance(s, StepPayload())  # calibration
+def _seed_to_manual_plan(owner_id):
+    s = _seed_to_channels_step(owner_id)
+    s = agent.advance(s, StepPayload(channel_ids=["tv_advertising", "meta_video_ads"]),
+                      owner_id=owner_id)
+    return agent.advance(s, StepPayload(), owner_id=owner_id)
 
 
-def test_project_name_length_cap_is_enforced():
-    """TC-1.2 — 200 chars rejected."""
-    s = _seed_to_project_step()
+def test_project_name_length_cap_is_enforced(owner_id):
+    s = _seed_to_project_step(owner_id)
     with pytest.raises(agent.StepError, match="project_name"):
         agent.advance(
-            s,
-            StepPayload(project_name="A" * 200, start_date="2026-02-16", weeks=4),
+            s, StepPayload(project_name="A" * 200, start_date="2026-02-16", weeks=4),
+            owner_id=owner_id,
         )
 
 
-def test_channel_ids_list_cap_is_enforced():
-    """TC-1.3 — more than 50 channel ids rejected."""
-    s = _seed_to_channels_step()
+def test_channel_ids_list_cap_is_enforced(owner_id):
+    s = _seed_to_channels_step(owner_id)
     fake = [f"chan_{i}" for i in range(60)]
     with pytest.raises(agent.StepError, match=r"(channel_ids|too many)"):
-        agent.advance(s, StepPayload(channel_ids=fake))
+        agent.advance(s, StepPayload(channel_ids=fake), owner_id=owner_id)
 
 
-def test_weekly_budget_ceiling_is_enforced():
-    """TC-1.4 — per-cell budget above 1e12 rejected."""
-    s = _seed_to_manual_plan()
+def test_weekly_budget_ceiling_is_enforced(owner_id):
+    s = _seed_to_manual_plan(owner_id)
     with pytest.raises(agent.StepError, match=r"(too large|exceeds)"):
         agent.advance(
             s,
@@ -61,4 +57,5 @@ def test_weekly_budget_ceiling_is_enforced():
                 "tv_advertising":  [1e18, 0, 0, 0],
                 "meta_video_ads":  [0, 0, 0, 0],
             }),
+            owner_id=owner_id,
         )
