@@ -9,7 +9,7 @@ The state machine answers two questions each turn:
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # noqa: F401
 
 from ..schemas import (
     AgentSession,
@@ -211,13 +211,14 @@ def _apply_min_max(session: AgentSession, payload: StepPayload) -> None:
     session.automatic_input.constraints = payload.constraints or {}
 
 
-def _apply_optimize(session: AgentSession, payload: StepPayload) -> None:
+def _apply_optimize(session: AgentSession, payload: StepPayload,
+                    *, owner_id: str) -> None:
     """Trigger the optimization. The plan is computed + persisted here so the
     REVIEW step can show it."""
     plan = optimizer.compute_automatic_plan(session.brief, session.automatic_input)
     plan.brief_id = session.brief.id or session.id
     plan.name = "Plan 2"
-    saved = storage.save_plan(plan)
+    saved = storage.save_plan(plan, owner_id=owner_id)
     session.plan_id = saved.id
 
 
@@ -240,16 +241,18 @@ _STEP_HANDLERS = {
 
 # ---------- Session lifecycle ----------
 
-def create_session(mode: SessionMode) -> AgentSession:
+def create_session(mode: SessionMode, *, owner_id: str,
+                   project_id: Optional[str] = None) -> AgentSession:
     s = AgentSession(id="", mode=mode)
     brief = s.brief
     brief.start_date = date(2026, 2, 16)
     brief.weeks = 4
     brief.end_date = brief.start_date + timedelta(days=7 * brief.weeks - 1)
-    return storage.save_session(s)
+    return storage.save_session(s, owner_id=owner_id, project_id=project_id)
 
 
-def fork(source: AgentSession, target_mode: SessionMode) -> AgentSession:
+def fork(source: AgentSession, target_mode: SessionMode, *,
+         owner_id: str, project_id: Optional[str] = None) -> AgentSession:
     """Create a new session in the opposite mode, carrying the source Brief.
 
     Used when a PM has just finished Plan 1 (Manual) and wants CCS Planner to
@@ -295,11 +298,14 @@ def fork(source: AgentSession, target_mode: SessionMode) -> AgentSession:
             "source_plan_id": source.plan_id,
         },
     })
-    return storage.save_session(new)
+    return storage.save_session(new, owner_id=owner_id, project_id=project_id)
 
 
-def advance(session: AgentSession, payload: StepPayload) -> AgentSession:
+def advance(session: AgentSession, payload: StepPayload, *,
+            owner_id: str, prompt: str = "",
+            log_turn: bool = True) -> AgentSession:
     order = step_order(session.mode)
+    prev_step = session.step
     if payload.action == "back":
         idx = max(0, step_index(session) - 1)
         session.step = order[idx]
@@ -310,7 +316,11 @@ def advance(session: AgentSession, payload: StepPayload) -> AgentSession:
         handler = _STEP_HANDLERS.get(session.step)
         if not handler:
             raise StepError(f"Unknown step '{session.step}'")
-        handler(session, payload)
+        # Optimize handler needs owner_id to persist the plan.
+        if session.step == StepKey.OPTIMIZE:
+            _apply_optimize(session, payload, owner_id=owner_id)
+        else:
+            handler(session, payload)
         # Auto-skip Comms if user chose Reach planning
         idx = step_index(session) + 1
         if (
@@ -326,14 +336,25 @@ def advance(session: AgentSession, payload: StepPayload) -> AgentSession:
         plan = optimizer.compute_manual_plan(session.brief, session.manual_input)
         plan.brief_id = session.brief.id or session.id
         plan.name = "Plan 1"
-        saved = storage.save_plan(plan)
+        saved = storage.save_plan(plan, owner_id=owner_id)
         session.plan_id = saved.id
 
     session.history.append({
         "step": session.step.value,
         "payload": payload.model_dump(mode="json", exclude_none=True),
     })
-    return storage.save_session(session)
+    saved = storage.save_session(session, owner_id=owner_id)
+
+    # Append a ConversationTurn (option C — full brief snapshot).
+    if log_turn:
+        storage.log_turn(
+            session_id=saved.id,
+            step=prev_step.value,
+            payload=payload.model_dump(mode="json", exclude_none=True),
+            prompt=prompt,
+            brief_snapshot=saved.brief.model_dump(mode="json"),
+        )
+    return saved
 
 
 # ---------- Prompt & options per step ----------

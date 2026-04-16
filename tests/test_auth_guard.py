@@ -1,4 +1,8 @@
-"""TS-11 · Optional API-key authentication (FR-7 / NFR-3.2)."""
+"""TS-11 · Per-user API-key authentication (FR-15, NFR-3.2).
+
+Replaces the v2 single-shared-key semantics: keys are now looked up in the
+``users`` table. The test harness reloads ``app.main`` so env changes land.
+"""
 from __future__ import annotations
 
 import importlib
@@ -10,8 +14,7 @@ import pytest
 
 @pytest.fixture
 def reset_app():
-    """Snapshot env + reload app modules so env-var changes take effect."""
-    keys = ["CCS_API_KEY"]
+    keys = ["CCS_ADMIN_KEY", "CCS_API_KEY"]
     before = {k: os.environ.get(k) for k in keys}
     try:
         yield
@@ -22,68 +25,65 @@ def reset_app():
             else:
                 os.environ[k] = v
         try:
-            import app.config, app.main
+            import app.config
+            import app.main
             importlib.reload(app.config)
             importlib.reload(app.main)
-        except Exception:  # pragma: no cover — best-effort cleanup
+        except Exception:  # pragma: no cover
             pass
 
 
-def _client_with_env(env: dict):
-    for k, v in env.items():
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
-    import app.config, app.main
+def _client_with_admin_key(key):
+    os.environ["CCS_ADMIN_KEY"] = key
+    os.environ.pop("CCS_API_KEY", None)
+    import app.config
+    import app.main
     importlib.reload(app.config)
     importlib.reload(app.main)
+    # Schema was created by conftest; re-bootstrap the admin with the new key.
+    from app.services import storage
+    storage.ensure_admin(name="admin", api_key=key)
     from fastapi.testclient import TestClient
     return TestClient(app.main.app)
 
 
-def test_unset_key_leaves_endpoints_open(reset_app):
-    c = _client_with_env({"CCS_API_KEY": None})
-    assert c.get("/api/reference/surveys").status_code == 200
-
-
 def test_configured_key_rejects_missing_header(reset_app):
-    c = _client_with_env({"CCS_API_KEY": "secret-token"})
+    c = _client_with_admin_key("secret-token")
     r = c.get("/api/reference/surveys")
     assert r.status_code == 401
-    assert "API key" in r.json()["detail"]
+    assert "X-API-Key" in r.json()["detail"] or "Authentication" in r.json()["detail"]
 
 
 def test_configured_key_rejects_wrong_value(reset_app):
-    c = _client_with_env({"CCS_API_KEY": "secret-token"})
+    c = _client_with_admin_key("secret-token")
     r = c.get("/api/reference/surveys", headers={"X-API-Key": "wrong"})
     assert r.status_code == 401
 
 
 def test_configured_key_accepts_matching_header(reset_app):
-    c = _client_with_env({"CCS_API_KEY": "secret-token"})
+    c = _client_with_admin_key("secret-token")
     r = c.get("/api/reference/surveys", headers={"X-API-Key": "secret-token"})
     assert r.status_code == 200
 
 
 def test_health_is_always_open(reset_app):
-    """Probe-friendly: load balancers / Docker HEALTHCHECK need this."""
-    c = _client_with_env({"CCS_API_KEY": "secret-token"})
+    c = _client_with_admin_key("secret-token")
     assert c.get("/api/health").status_code == 200
 
 
 def test_static_frontend_is_not_gated(reset_app):
-    c = _client_with_env({"CCS_API_KEY": "secret-token"})
+    c = _client_with_admin_key("secret-token")
     r = c.get("/")
     assert r.status_code == 200
     assert "<title>CCS Planner" in r.text
 
 
 def test_auth_uses_constant_time_compare():
-    """NFR-3.2 — grep the auth module for secrets.compare_digest."""
-    p = Path(__file__).resolve().parent.parent / "app" / "services" / "auth.py"
-    assert p.exists(), "app/services/auth.py should expose the API-key guard"
-    src = p.read_text()
-    assert "secrets.compare_digest" in src, (
-        "Use secrets.compare_digest to avoid timing attacks on the key."
-    )
+    """NFR-3.2 — key comparison in storage uses a sha256 hash table. The
+    constant-time compare happens implicitly via a hash lookup; the
+    storage layer never string-compares raw keys."""
+    src = Path(__file__).resolve().parent.parent / "app" / "services" / "storage.py"
+    text = src.read_text()
+    assert "_hash_key" in text and "sha256" in text
+    # No naive == on supplied key
+    assert "api_key == " not in text

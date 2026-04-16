@@ -213,8 +213,54 @@ class AgentSession(BaseModel):
 
 # ---------- API envelopes ----------
 
+# ---------- v4 entities: User / Project / Conversation ----------
+
+class User(BaseModel):
+    id: str
+    name: str
+    is_admin: bool = False
+    created_at: float = 0.0
+
+
+class Project(BaseModel):
+    id: str
+    name: str
+    owner_id: str
+    created_at: float = 0.0
+    archived: bool = False
+    session_count: int = 0
+    plan_count: int = 0
+
+
+class ConversationTurn(BaseModel):
+    """One step of a session's history (option C — full brief snapshot).
+
+    ``brief_snapshot`` holds the entire brief state after the step. Diffing
+    two turns reconstructs what the user changed; replaying the list
+    reproduces the full conversation.
+    """
+    id: str
+    session_id: str
+    turn_index: int
+    step: str
+    payload: Dict
+    prompt: str
+    brief_snapshot: Dict
+    ts: float
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+
+
+class CreateUserRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+    is_admin: bool = False
+
+
 class CreateSessionRequest(BaseModel):
     mode: SessionMode = SessionMode.MANUAL
+    project_id: Optional[str] = None
 
 
 class SessionStepResponse(BaseModel):

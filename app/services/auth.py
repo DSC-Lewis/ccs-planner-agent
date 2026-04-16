@@ -1,28 +1,29 @@
-"""Optional API-key authentication.
+"""Per-user API-key authentication (v4).
 
-When ``CCS_API_KEY`` is set in the environment, every ``/api/*`` route
-except ``/api/health`` MUST include an ``X-API-Key`` header whose value
-matches the configured key. When the variable is empty or missing, the
-guard is a no-op — this keeps local development and existing demos
-zero-config.
+Starting with PRD v4 every user has their own API key. The middleware:
 
-We use :func:`secrets.compare_digest` for the comparison so a remote
-attacker can't use response-time differences to learn the key byte-by-byte.
+1. Reads ``X-API-Key`` from the request.
+2. Looks up the user by ``sha256(key)`` in SQLite (constant-time-safe).
+3. Attaches the ``User`` to ``request.state.user`` so route handlers can
+   depend on it and the service layer can scope every query by
+   ``owner_id``.
+4. Short-circuits with 401 for protected routes when no valid user matches.
+
+Backward compatibility: if ``CCS_ADMIN_KEY`` (or the legacy ``CCS_API_KEY``)
+is set and the DB has an admin user with that key, the existing single-key
+workflows keep working unchanged.
 """
 from __future__ import annotations
-
-import secrets
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from ..config import API_KEY
+from . import storage
 
 
-# Paths that remain open even when authentication is enabled.
-# Health probes, the static frontend, and the OpenAPI docs must stay
-# reachable — without them ops tooling and the UI can't bootstrap.
+# Routes that never require auth. Health probes, docs, and the static
+# frontend all need to bootstrap before the user has typed a key in.
 OPEN_PATH_PREFIXES: tuple[str, ...] = (
     "/api/health",
     "/docs",
@@ -38,19 +39,17 @@ def _is_protected_api_path(path: str) -> bool:
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
-    """Starlette middleware that enforces ``X-API-Key`` on API routes."""
-
     async def dispatch(self, request: Request, call_next):
-        # Re-read the configured key each request so tests that reload the
-        # config module observe the new value immediately.
-        from ..config import API_KEY as CURRENT_KEY
-        if CURRENT_KEY and _is_protected_api_path(request.url.path):
-            supplied = request.headers.get("X-API-Key", "")
-            if not supplied or not secrets.compare_digest(
-                supplied.encode("utf-8"), CURRENT_KEY.encode("utf-8")
-            ):
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "API key required or invalid. Set X-API-Key header."},
-                )
+        request.state.user = None
+        supplied = request.headers.get("X-API-Key", "")
+        if supplied:
+            user = storage.get_user_by_api_key(supplied)
+            if user:
+                request.state.user = user
+
+        if _is_protected_api_path(request.url.path) and request.state.user is None:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Authentication required. Set X-API-Key header."},
+            )
         return await call_next(request)

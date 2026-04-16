@@ -11,6 +11,11 @@ STATIC_DIR = BASE_DIR / "static"
 STORAGE_PATH = Path(os.getenv("CCS_STORAGE_PATH", BASE_DIR / "var" / "storage.json"))
 STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# SQLite path — the canonical persistence store as of v4. ``STORAGE_PATH``
+# above is only kept for the one-shot migration.
+DATABASE_PATH = Path(os.getenv("CCS_DATABASE_PATH", BASE_DIR / "var" / "ccs.db"))
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 CORS_ORIGINS = [
     o.strip()
     for o in os.getenv("CCS_CORS_ORIGINS", "*").split(",")
@@ -46,3 +51,7 @@ RATE_LIMIT = os.getenv("CCS_RATE_LIMIT", "30/60")
 
 # Session TTL (seconds). Older sessions are purged on the next write.
 SESSION_TTL_SECONDS = int(os.getenv("CCS_SESSION_TTL_SECONDS", "604800"))
+
+# Admin bootstrap — if set, an "admin" user with this key is created on boot.
+# Falls back to legacy CCS_API_KEY for zero-config upgrades.
+ADMIN_KEY = os.getenv("CCS_ADMIN_KEY") or os.getenv("CCS_API_KEY") or ""

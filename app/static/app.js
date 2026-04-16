@@ -1,7 +1,26 @@
 /* CCS Planner · Briefing Agent — vanilla JS client.
  * Talks to the FastAPI backend under /api/*. Persists the session id in
  * localStorage so a refresh resumes the conversation.
+ *
+ * v4: multi-tenant — user logs in with an API key, the key is kept in
+ * localStorage under `ccs.apiKey`, and every fetch() is routed through
+ * apiFetch() so the X-API-Key header is attached automatically.
  */
+
+/* ---------- Auth helpers (v4) ---------- */
+const API_KEY_STORAGE = "ccs.apiKey";
+function getApiKey() { return localStorage.getItem(API_KEY_STORAGE) || ""; }
+function setApiKey(k) {
+  if (k) localStorage.setItem(API_KEY_STORAGE, k);
+  else localStorage.removeItem(API_KEY_STORAGE);
+}
+async function apiFetch(url, opts = {}) {
+  const key = getApiKey();
+  const headers = { ...(opts.headers || {}) };
+  if (key) headers["X-API-Key"] = key;
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  return fetch(url, { ...opts, headers });
+}
 
 const STEP_LABELS = {
   survey_client:   "1. Survey & Client",
@@ -123,7 +142,7 @@ async function loadChartLib() {
 /* ---------- API ---------- */
 const api = {
   async create(mode) {
-    const r = await fetch("/api/sessions", {
+    const r = await apiFetch("/api/sessions", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode })
     });
@@ -131,12 +150,12 @@ const api = {
     return r.json();
   },
   async get(id) {
-    const r = await fetch(`/api/sessions/${id}`);
+    const r = await apiFetch(`/api/sessions/${id}`);
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
   async advance(id, payload) {
-    const r = await fetch(`/api/sessions/${id}/advance`, {
+    const r = await apiFetch(`/api/sessions/${id}/advance`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
@@ -144,11 +163,11 @@ const api = {
     return r.json();
   },
   async health() {
-    const r = await fetch("/api/health");
+    const r = await apiFetch("/api/health");
     return r.ok ? r.json() : null;
   },
   async comparePlans(ids) {
-    const r = await fetch("/api/plans/compare", {
+    const r = await apiFetch("/api/plans/compare", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(ids)
     });
@@ -156,7 +175,7 @@ const api = {
     return r.json();
   },
   async fork(id, target_mode) {
-    const r = await fetch(`/api/sessions/${id}/fork`, {
+    const r = await apiFetch(`/api/sessions/${id}/fork`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_mode })
     });
@@ -165,7 +184,41 @@ const api = {
   },
   async listPlans(brief_id) {
     const url = brief_id ? `/api/plans?brief_id=${encodeURIComponent(brief_id)}` : "/api/plans";
-    const r = await fetch(url);
+    const r = await apiFetch(url);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async me() {
+    const r = await apiFetch("/api/me");
+    return r.ok ? r.json() : null;
+  },
+  async listProjects() {
+    const r = await apiFetch("/api/projects");
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async createProject(name) {
+    const r = await apiFetch("/api/projects", { method: "POST", body: JSON.stringify({ name }) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async archiveProject(id) {
+    const r = await apiFetch(`/api/projects/${id}`, { method: "DELETE" });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async projectSessions(id) {
+    const r = await apiFetch(`/api/projects/${id}/sessions`);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async projectPlans(id) {
+    const r = await apiFetch(`/api/projects/${id}/plans`);
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async conversation(sid) {
+    const r = await apiFetch(`/api/sessions/${sid}/conversation`);
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
@@ -931,7 +984,7 @@ async function openComparePicker() {
 }
 
 async function renderCompare(planIds) {
-  const r = await fetch("/api/plans/compare", {
+  const r = await apiFetch("/api/plans/compare", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(planIds),
   });
@@ -1119,12 +1172,222 @@ function drawWeeklyChart(Chart, canvas, payload) {
   });
 }
 
-/* ---------- Boot ---------- */
-(async function boot() {
+/* ---------- v4: Login + Home + Project detail + History ---------- */
+
+function renderLogin() {
+  scroll.innerHTML = "";
+  const msg = botSay("👤 請輸入 API key 以進入 CCS Planning Agent。");
+  const wrap = el("div", { class: "card", style: "max-width:460px" });
+  const input = el("input", { id: "apikey", type: "password", placeholder: "paste X-API-Key…",
+    style: "width:100%;border:1px solid #E5E7EB;border-radius:8px;padding:10px;font:inherit" });
+  wrap.append(
+    el("h5", {}, "Login"),
+    el("div", { class: "note" }, "Admin: 用 CCS_ADMIN_KEY 啟動時設定的 key。其他人: admin 在 /api/users 產生後發給你的一次性 key。"),
+    el("div", { style: "margin:10px 0" }, input),
+    quickRow([{ label: "登入 ▶", primary: true }], () => {
+      const k = input.value.trim();
+      if (!k) return;
+      setApiKey(k);
+      bootApp();
+    })
+  );
+  msg.append(wrap);
+}
+
+function showLoginPrompt() { renderLogin(); }
+
+async function renderProjects() {
+  scroll.innerHTML = "";
+  const msg = botSay("🏠 <b>Home</b> — 你的專案清單：");
+  const list = el("div", { class: "card compare-view full" });
+  const header = el("div", { style: "display:flex;align-items:center;margin-bottom:8px" },
+    el("h5", { style: "margin:0" }, "Projects"),
+    el("div", { style: "margin-left:auto;display:flex;gap:8px" },
+      el("input", { id: "newproj", placeholder: "new project name", style: "border:1px solid #E5E7EB;border-radius:8px;padding:6px 10px;font:inherit" }),
+      el("button", {
+        class: "",
+        style: "border:0;background:#111827;color:#fff;padding:7px 14px;border-radius:999px;cursor:pointer",
+        onclick: async () => {
+          const name = $("#newproj").value.trim();
+          if (!name) return;
+          await api.createProject(name);
+          renderProjects();
+        },
+      }, "+ New project")
+    )
+  );
+  list.append(header);
+  const grid = el("div", { class: "grid" });
+  try {
+    const projects = await api.listProjects();
+    if (!projects.length) {
+      grid.append(el("div", { class: "empty full" }, "尚無專案。輸入名稱按 + New project 建立第一個。"));
+    } else {
+      projects.forEach(p => {
+        const card = el("div", { class: "card", style: "cursor:pointer", onclick: () => renderProjectDetail(p.id) },
+          el("h5", {}, p.name),
+          el("div", { class: "sum-row" }, el("span", {}, "Sessions"), el("b", {}, String(p.session_count))),
+          el("div", { class: "sum-row" }, el("span", {}, "Plans"), el("b", {}, String(p.plan_count)))
+        );
+        grid.append(card);
+      });
+    }
+  } catch (err) { showError(err); }
+  list.append(grid);
+  msg.append(list);
+}
+
+async function renderProjectDetail(projectId) {
+  scroll.innerHTML = "";
+  const msg = botSay("📁 Project detail");
+  const wrap = el("div", { class: "card compare-view full" });
+  try {
+    const [proj, sessions, plans] = await Promise.all([
+      apiFetch(`/api/projects/${projectId}`).then(r => r.json()),
+      api.projectSessions(projectId),
+      api.projectPlans(projectId),
+    ]);
+    wrap.append(
+      el("h5", {}, `📁 ${proj.name}`),
+      el("div", { style: "display:flex;gap:8px;margin:8px 0" },
+        el("button", { style: "padding:6px 12px;border-radius:999px;border:1px solid #E5E7EB;background:#fff;cursor:pointer",
+          onclick: () => renderProjects() }, "← All projects"),
+        el("button", { style: "padding:6px 12px;border-radius:999px;border:0;background:#111827;color:#fff;cursor:pointer",
+          onclick: () => startNewSessionInProject(projectId, "manual") }, "+ Manual session"),
+        el("button", { style: "padding:6px 12px;border-radius:999px;border:0;background:#8B5CF6;color:#fff;cursor:pointer",
+          onclick: () => startNewSessionInProject(projectId, "automatic") }, "+ Automatic session"),
+      )
+    );
+
+    const sTbl = el("table", { class: "tbl" });
+    sTbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Session"), el("th", {}, "Mode"), el("th", {}, "Step"), el("th", {}, "Open"))));
+    const sBody = el("tbody", {});
+    sessions.forEach(s => {
+      sBody.append(el("tr", {},
+        el("td", {}, s.id),
+        el("td", {}, s.mode),
+        el("td", {}, s.step),
+        el("td", {}, el("button", {
+          style: "padding:4px 10px;border-radius:999px;border:1px solid #E5E7EB;background:#fff;cursor:pointer",
+          onclick: () => resumeSession(s.id, s.mode),
+        }, "Resume ▶"))
+      ));
+    });
+    sTbl.append(sBody);
+    wrap.append(el("h5", { style: "margin-top:12px" }, `Sessions (${sessions.length})`), sTbl);
+
+    const pTbl = el("table", { class: "tbl" });
+    pTbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Plan"), el("th", {}, "Kind"),
+      el("th", { class: "num" }, "Budget"),
+      el("th", { class: "num" }, "Reach %"))));
+    const pBody = el("tbody", {});
+    plans.forEach(p => pBody.append(el("tr", {},
+      el("td", {}, p.name),
+      el("td", {}, p.kind),
+      el("td", { class: "num" }, Math.round(p.summary?.total_budget_twd || 0).toLocaleString()),
+      el("td", { class: "num" }, (p.summary?.net_reach_pct || 0).toFixed(2))
+    )));
+    pTbl.append(pBody);
+    wrap.append(el("h5", { style: "margin-top:12px" }, `Plans (${plans.length})`), pTbl);
+
+    if (plans.length >= 2) {
+      wrap.append(quickRow(
+        [{ label: "📊 Compare these plans", primary: true }],
+        () => renderCompare(plans.map(p => p.id))
+      ));
+    }
+  } catch (err) { showError(err); }
+  msg.append(wrap);
+}
+
+async function startNewSessionInProject(projectId, mode) {
+  try {
+    const res = await apiFetch("/api/sessions", {
+      method: "POST", body: JSON.stringify({ mode, project_id: projectId })
+    }).then(r => r.json());
+    state.mode = mode;
+    state.sessionId = res.session.id;
+    applyResponse(res);
+    syncModeButtons();
+    scroll.innerHTML = "";
+    botSay(`🚀 開啟新 session in project. (id: <code>${escapeHTML(res.session.id)}</code>)`);
+    renderSidebar();
+    renderSummary();
+    renderStep();
+  } catch (err) { showError(err); }
+}
+
+async function resumeSession(sessionId, mode) {
+  try {
+    const res = await api.get(sessionId);
+    state.mode = mode;
+    state.sessionId = sessionId;
+    applyResponse(res);
+    syncModeButtons();
+    scroll.innerHTML = "";
+    botSay(`⏪ Resume session <code>${escapeHTML(sessionId)}</code>`);
+    renderSidebar();
+    renderSummary();
+    renderStep();
+  } catch (err) { showError(err); }
+}
+
+async function renderHistory(sessionId) {
+  const sid = sessionId || state.sessionId;
+  if (!sid) { botSay("⚠️ 沒有 session 可顯示 history。"); return; }
+  try {
+    const turns = await api.conversation(sid);
+    const msg = botSay(`📜 Conversation history — ${turns.length} turns`);
+    const wrap = el("div", { class: "card full" });
+    const tbl = el("table", { class: "tbl" });
+    tbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "#"), el("th", {}, "Step"), el("th", {}, "When"),
+      el("th", {}, "Payload"), el("th", {}, "Brief snapshot"))));
+    const body = el("tbody", {});
+    turns.forEach(t => {
+      const when = new Date(t.ts * 1000).toLocaleString();
+      const payloadPre = el("pre", { style: "font-size:11px;max-width:260px;white-space:pre-wrap;margin:0" });
+      payloadPre.textContent = JSON.stringify(t.payload, null, 2);
+      const snapPre = el("pre", { style: "font-size:11px;max-width:320px;white-space:pre-wrap;margin:0;max-height:140px;overflow:auto" });
+      snapPre.textContent = JSON.stringify(t.brief_snapshot, null, 2);
+      body.append(el("tr", {},
+        el("td", {}, String(t.turn_index)),
+        el("td", {}, t.step),
+        el("td", {}, when),
+        el("td", {}, payloadPre),
+        el("td", {}, snapPre),
+      ));
+    });
+    tbl.append(body);
+    wrap.append(tbl);
+    msg.append(wrap);
+  } catch (err) { showError(err); }
+}
+
+/* ---------- Boot (v4) ---------- */
+
+async function bootApp() {
   const h = await api.health().catch(() => null);
   const el2 = $("#apiIndicator");
   const st = $("#apiStatus");
   if (h) { el2.classList.add("ok"); st.textContent = "ok · v" + h.version; }
   else   { el2.classList.add("err"); st.textContent = "unreachable"; }
-  resumeOrStart();
-})();
+  if (!getApiKey()) { showLoginPrompt(); return; }
+  const me = await api.me().catch(() => null);
+  if (!me) { setApiKey(""); showLoginPrompt(); return; }
+  botSay(`👋 Hi <b>${escapeHTML(me.name)}</b>${me.is_admin ? " (admin)" : ""} — 載入專案…`);
+  renderProjects();
+}
+
+/* Install #navHome click (delegated) */
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLElement)) return;
+  if (t.id === "btnHome") { renderProjects(); }
+  if (t.id === "btnHistory") { renderHistory(); }
+  if (t.id === "btnLogout") { setApiKey(""); bootApp(); }
+});
+
+bootApp();

@@ -34,14 +34,19 @@ def _fresh_client(env: dict):
     importlib.reload(app.config)
     importlib.reload(app.main)
     from fastapi.testclient import TestClient
-    # Reset the in-memory rate limiter state between tests.
-    from app.services import rate_limit
+    from app.services import rate_limit, storage
     rate_limit.reset()
-    return TestClient(app.main.app)
+    # Re-seed the default admin (the reload wiped app.main's middleware state
+    # but the conftest fixture already provisioned the user once; make sure
+    # it still exists).
+    if not storage.get_user_by_name("default"):
+        storage.ensure_admin(name="default", api_key="__test_default_key__")
+    c = TestClient(app.main.app)
+    c.headers.update({"X-API-Key": "__test_default_key__"})
+    return c
 
 
 def test_within_limit_all_pass(reset_app):
-    """TC-12.1 — 5 POSTs with a 5/10 budget should all succeed."""
     c = _fresh_client({"CCS_RATE_LIMIT": "5/10"})
     for _ in range(5):
         r = c.post("/api/sessions", json={"mode": "manual"})
@@ -49,7 +54,6 @@ def test_within_limit_all_pass(reset_app):
 
 
 def test_exceeding_limit_returns_429_with_retry_after(reset_app):
-    """TC-12.2 — 6th request in the window trips 429."""
     c = _fresh_client({"CCS_RATE_LIMIT": "5/10"})
     for _ in range(5):
         assert c.post("/api/sessions", json={"mode": "manual"}).status_code == 200
@@ -60,7 +64,6 @@ def test_exceeding_limit_returns_429_with_retry_after(reset_app):
 
 
 def test_get_endpoints_are_not_rate_limited(reset_app):
-    """TC-12.3 — read endpoints have no per-IP ceiling."""
     c = _fresh_client({"CCS_RATE_LIMIT": "2/60"})
     for _ in range(20):
         r = c.get("/api/reference/surveys")
@@ -68,8 +71,6 @@ def test_get_endpoints_are_not_rate_limited(reset_app):
 
 
 def test_default_limit_does_not_break_existing_tests(reset_app):
-    """TC-12.4 — the default (30/60) is generous enough that a normal
-    three-step session flow still fits."""
     c = _fresh_client({"CCS_RATE_LIMIT": "30/60"})
     r = c.post("/api/sessions", json={"mode": "manual"})
     assert r.status_code == 200
