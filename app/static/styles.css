@@ -121,3 +121,58 @@ pre.code{background:#0B0B0D;color:#D1FADF;padding:12px;border-radius:10px;overfl
   .app{grid-template-columns:0 1fr 0}
   aside.sidebar,aside.summary{display:none}
 }
+
+/* ---------- Compare Plans view ---------- */
+.modal-backdrop{
+  position:fixed;inset:0;background:rgba(17,24,39,.45);
+  display:grid;place-items:center;z-index:50;padding:20px
+}
+.modal{
+  background:#fff;border-radius:14px;max-width:540px;width:100%;
+  box-shadow:0 20px 60px rgba(17,24,39,.3);overflow:hidden
+}
+.modal header{
+  padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center
+}
+.modal header b{font-size:14px}
+.modal header button{
+  margin-left:auto;background:transparent;border:0;font-size:18px;cursor:pointer;color:var(--sub)
+}
+.modal .body{padding:16px 18px;max-height:60vh;overflow:auto}
+.modal .foot{
+  padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end
+}
+.modal .foot button{
+  padding:8px 14px;border-radius:999px;border:1px solid var(--border);background:#fff;cursor:pointer
+}
+.modal .foot button.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+.modal .foot button.primary:disabled{opacity:.4;cursor:not-allowed}
+.plan-row{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);
+  border-radius:10px;margin-bottom:8px;cursor:pointer;user-select:none
+}
+.plan-row input[type=checkbox]{transform:scale(1.2)}
+.plan-row .meta{color:var(--sub);font-size:12px;margin-left:auto}
+
+/* comparison section */
+.compare-view{max-width:1040px}
+.compare-view .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.compare-view .card{margin:0}
+.compare-view canvas{max-height:280px}
+.compare-view .full{grid-column:1/-1}
+.compare-view table.tbl td.num{font-variant-numeric:tabular-nums}
+.compare-view .hero{
+  background:linear-gradient(135deg,#EEF2FF,#F5F3FF);border-radius:14px;padding:14px;margin-bottom:10px;
+  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px
+}
+.compare-view .hero .cell{text-align:center}
+.compare-view .hero .cell small{color:var(--sub);font-size:11px;text-transform:uppercase;letter-spacing:.1em}
+.compare-view .hero .cell b{display:block;font-size:18px;margin-top:4px;font-variant-numeric:tabular-nums}
+.compare-view .hero .cell .delta{font-size:11px;font-weight:600}
+.compare-view .hero .cell .delta.up{color:#10B981}
+.compare-view .hero .cell .delta.down{color:#DC2626}
+.compare-view .fallback{
+  background:#FEF3C7;border:1px solid #FDE68A;color:#92400E;
+  padding:10px 12px;border-radius:10px;font-size:13px;margin-bottom:10px
+}
+

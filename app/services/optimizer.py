@@ -324,6 +324,87 @@ def budget_step_curve(
 
 # ---------- Suggestion helpers ----------
 
+# ---------- Frequency distribution (FR-10) ----------
+
+def frequency_distribution(plan: Plan, thresholds: int = 10) -> List[Dict]:
+    """Reach at 1+, 2+, ..., N+ exposures.
+
+    Uses a geometric-decay approximation: for average frequency ``f``, the
+    share of the reached audience that saw ≥ n ads decays as ``(1 - 1/f)``
+    per extra exposure. It's the simplest model that (a) equals full net
+    reach at 1+, (b) stays monotonic, and (c) collapses sensibly to zero
+    when reach or frequency are zero.
+
+    The real CCS Planner uses a published beta-binomial curve per channel;
+    swapping that in is a drop-in replacement when the curves arrive.
+    """
+    reach = max(0.0, min(100.0, plan.summary.net_reach_pct))
+    freq = max(0.0, plan.summary.frequency)
+    out: List[Dict] = []
+    if reach <= 0 or freq <= 0:
+        return [{"threshold": n, "reach_pct": 0.0} for n in range(1, thresholds + 1)]
+
+    decay = max(0.0, min(0.99, 1.0 - 1.0 / max(freq, 1.01)))
+    cur = reach
+    for n in range(1, thresholds + 1):
+        out.append({"threshold": n, "reach_pct": round(max(0.0, min(100.0, cur)), 2)})
+        cur *= decay
+    return out
+
+
+# ---------- Duplication & exclusivity (FR-11) ----------
+
+def duplication_matrix(plan: Plan, overlap_factor: float = 0.2) -> Dict[str, Dict]:
+    """Pairwise duplication and remaining exclusivity per channel.
+
+    ``duplication(A,B) = min(rA,rB) / max(rA,rB) * overlap_factor * min(rA,rB)``
+    (so duplicated reach is in the same 0..100% units as the channel reaches).
+    Exclusivity is the portion of the channel's reach not duplicated with
+    anyone else in the plan, clamped to non-negative.
+
+    Numbers are heuristic — matched against video demo patterns rather than
+    derived from survey overlap data. Replace with real overlap tables when
+    available.
+    """
+    channels = plan.allocations
+    out: Dict[str, Dict] = {}
+    for i, a in enumerate(channels):
+        pair_dupes: Dict[str, float] = {}
+        total_dupe = 0.0
+        for j, b in enumerate(channels):
+            if i == j:
+                continue
+            smaller = min(a.net_reach_pct, b.net_reach_pct)
+            larger = max(a.net_reach_pct, b.net_reach_pct)
+            if larger <= 0:
+                dupe = 0.0
+            else:
+                dupe = smaller / larger * overlap_factor * smaller
+            pair_dupes[b.channel_id] = round(max(0.0, min(100.0, dupe)), 2)
+            total_dupe += dupe
+        exclusivity = max(0.0, a.net_reach_pct - total_dupe)
+        out[a.channel_id] = {
+            "duplication_pct": round(min(100.0, total_dupe), 2),
+            "exclusivity_pct": round(min(100.0, exclusivity), 2),
+            "pairwise": pair_dupes,
+        }
+    return out
+
+
+# ---------- Weekly roll-up for chart layer ----------
+
+def weekly_grp(plan: Plan) -> List[Dict]:
+    """Roll up GRP across channels into a week-by-week series."""
+    totals: Dict[int, float] = {}
+    for alloc in plan.allocations:
+        for w in alloc.weeks:
+            totals[w.week] = totals.get(w.week, 0.0) + w.grp
+    return [
+        {"week": week, "grp": round(grp, 2)}
+        for week, grp in sorted(totals.items())
+    ]
+
+
 def suggest_weekly_budget(channel_id: str, weeks: int) -> List[float]:
     """Demo defaults aligned with the screenshot in the training video."""
     demo = {

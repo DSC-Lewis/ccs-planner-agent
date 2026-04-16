@@ -94,6 +94,32 @@ function field(label, inputEl) {
   return el("div", { class: "field" }, el("label", {}, label), el("div", {}, inputEl));
 }
 
+/* ---------- Palette & Chart.js loader (FR-14 / NFR-4) ---------- */
+// 6-colour palette — channel→colour mapping stays deterministic across charts.
+const PALETTE = ["#2563EB", "#8B5CF6", "#EC4899", "#10B981", "#F59E0B", "#06B6D4"];
+function colourFor(key, idx) {
+  // deterministic hash-ish: hash string to index when idx not supplied
+  if (typeof idx === "number") return PALETTE[idx % PALETTE.length];
+  let h = 0;
+  for (let i = 0; i < String(key).length; i++) h = (h * 31 + String(key).charCodeAt(i)) | 0;
+  return PALETTE[Math.abs(h) % PALETTE.length];
+}
+
+let _chartLib = null;
+async function loadChartLib() {
+  if (_chartLib) return _chartLib;
+  try {
+    // Chart.js 4 via jsDelivr ESM build — no bundler needed.
+    const mod = await import("https://cdn.jsdelivr.net/npm/chart.js@4.4.1/+esm");
+    _chartLib = mod.Chart;
+    _chartLib.register(...mod.registerables);
+    return _chartLib;
+  } catch (err) {
+    console.warn("Chart.js CDN load failed — falling back to tables only", err);
+    return null;
+  }
+}
+
 /* ---------- API ---------- */
 const api = {
   async create(mode) {
@@ -134,6 +160,12 @@ const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_mode })
     });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async listPlans(brief_id) {
+    const url = brief_id ? `/api/plans?brief_id=${encodeURIComponent(brief_id)}` : "/api/plans";
+    const r = await fetch(url);
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
@@ -729,8 +761,10 @@ function renderReview(msg) {
   msg.append(card);
   msg.append(quickRow([
     { label: state.mode === "manual" ? "帶著這份 Brief 跑 Automatic Plan ▶" : "帶著這份 Brief 跑 Manual Plan ▶", primary: true },
+    { label: "Compare plans ▶", value: "compare" },
     { label: "全新 session" }
   ], async (v, o) => {
+    if (o.label.startsWith("Compare")) { openComparePicker(); return; }
     if (o.label.startsWith("帶著")) {
       const target = state.mode === "manual" ? "automatic" : "manual";
       try {
@@ -842,6 +876,248 @@ $("#btnReset").addEventListener("click",  () => {
   localStorage.removeItem("ccs_session_" + state.mode);
   startSession();
 });
+
+/* ---------- Compare plans (FR-13..FR-14) ---------- */
+
+async function openComparePicker() {
+  let plans;
+  try {
+    const briefId = state.session?.brief?.id || state.session?.id;
+    plans = await api.listPlans(briefId);
+    if (!plans || plans.length < 2) plans = await api.listPlans();
+  } catch (e) { showError(e); return; }
+
+  if (!plans || plans.length < 2) {
+    botSay("⚠️ 至少要有 2 個 saved plans 才能比較。目前只找到 " + (plans?.length || 0) + " 個。");
+    return;
+  }
+
+  const backdrop = el("div", { class: "modal-backdrop" });
+  const modal = el("div", { class: "modal" });
+  const body = el("div", { class: "body" });
+  plans.forEach((p, i) => {
+    const row = el("label", { class: "plan-row" },
+      el("input", { type: "checkbox", value: p.id, ...(i < 2 ? { checked: "" } : {}) }),
+      el("div", {}, `${p.name} · ${p.kind}`,
+        el("div", { class: "meta" },
+          `budget ${Math.round(p.summary?.total_budget_twd || 0).toLocaleString()} · `
+          + `reach ${(p.summary?.net_reach_pct || 0).toFixed(1)}%`))
+    );
+    body.append(row);
+  });
+
+  const confirmBtn = el("button", { class: "primary" }, "比較選定的 plans ▶");
+  const cancelBtn = el("button", {}, "取消");
+  const close = () => backdrop.remove();
+  cancelBtn.addEventListener("click", close);
+  document.addEventListener("keydown", function esc(e) {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", esc); }
+  });
+  confirmBtn.addEventListener("click", async () => {
+    const ids = [...body.querySelectorAll("input:checked")].map(x => x.value);
+    if (ids.length < 2) return;
+    close();
+    await renderCompare(ids);
+  });
+
+  modal.append(
+    el("header", {}, el("b", {}, "Compare plans"),
+      el("button", { onclick: close }, "✕")),
+    body,
+    el("div", { class: "foot" }, cancelBtn, confirmBtn)
+  );
+  backdrop.append(modal);
+  document.body.append(backdrop);
+}
+
+async function renderCompare(planIds) {
+  const r = await fetch("/api/plans/compare", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(planIds),
+  });
+  if (!r.ok) { showError(new Error(await r.text())); return; }
+  const payload = await r.json();
+
+  const section = el("div", { class: "card compare-view full" });
+  section.append(el("h5", {}, "📊 Plan comparison"));
+
+  const hero = el("div", { class: "hero" });
+  const hm = [
+    ["Budget (TWD)", "total_budget_twd", v => Math.round(v).toLocaleString(), false],
+    ["Impressions", "total_impressions", v => Math.round(v).toLocaleString(), false],
+    ["Net Reach %", "net_reach_pct", v => v.toFixed(2) + "%", true],
+    ["Frequency", "frequency", v => v.toFixed(2), true],
+    ["Total GRP", "total_grp", v => v.toFixed(2), true],
+  ];
+  hm.forEach(([label, key, fmt, higherIsBetter]) => {
+    const v0 = payload.plans[0].summary[key] ?? 0;
+    const v1 = payload.plans[payload.plans.length - 1].summary[key] ?? 0;
+    const diff = v1 - v0;
+    const goodDirection = (higherIsBetter && diff > 0) || (!higherIsBetter && diff < 0);
+    const sign = diff > 0 ? "+" : "";
+    hero.append(el("div", { class: "cell" },
+      el("small", {}, label),
+      el("b", {}, fmt(v1)),
+      el("div", {
+        class: "delta " + (diff === 0 ? "" : goodDirection ? "up" : "down"),
+      }, diff === 0 ? "—" : `${sign}${fmt(diff)} vs ${payload.plans[0].name}`)
+    ));
+  });
+  section.append(hero);
+
+  const grid = el("div", { class: "grid" });
+  const summaryCanvas = el("canvas", { id: "chart-summary" });
+  const budgetCanvas = el("canvas", { id: "chart-budget" });
+  const reachCanvas = el("canvas", { id: "chart-reach" });
+  const freqCanvas = el("canvas", { id: "chart-frequency" });
+  const weeklyCanvas = el("canvas", { id: "chart-weekly", style: "max-height:260px" });
+
+  grid.append(
+    el("div", { class: "card" }, el("h5", {}, "Performance summary"), summaryCanvas),
+    el("div", { class: "card" }, el("h5", {}, "Budget per channel"), budgetCanvas),
+    el("div", { class: "card" }, el("h5", {}, "Reach / Attentive / Engagement"), reachCanvas),
+    el("div", { class: "card" }, el("h5", {}, "Frequency distribution (1+ … 10+)"), freqCanvas),
+    el("div", { class: "card full" }, el("h5", {}, "Weekly GRP"), weeklyCanvas),
+  );
+  section.append(grid);
+
+  const dupWrap = el("div", { class: "card full" });
+  dupWrap.append(el("h5", {}, "Duplication & Exclusivity"));
+  const dupTbl = el("table", { class: "tbl" });
+  const dupHead = el("tr", {}, el("th", {}, "Plan"), el("th", {}, "Channel"),
+    el("th", { class: "num" }, "Net Reach %"),
+    el("th", { class: "num" }, "Exclusivity %"),
+    el("th", { class: "num" }, "Duplication %"));
+  dupTbl.append(el("thead", {}, dupHead));
+  const dupBody = el("tbody", {});
+  payload.plans.forEach(p => {
+    (p.allocations || []).forEach(a => {
+      const d = p.duplication?.[a.channel_id] || { exclusivity_pct: 0, duplication_pct: 0 };
+      dupBody.append(el("tr", {},
+        el("td", {}, p.name),
+        el("td", {}, a.channel_id),
+        el("td", { class: "num" }, (a.net_reach_pct || 0).toFixed(2)),
+        el("td", { class: "num" }, d.exclusivity_pct.toFixed(2)),
+        el("td", { class: "num" }, d.duplication_pct.toFixed(2))
+      ));
+    });
+  });
+  dupTbl.append(dupBody);
+  dupWrap.append(dupTbl);
+
+  const msg = botSay("🔍 Comparison ready —");
+  msg.append(section);
+  msg.append(dupWrap);
+
+  try {
+    const Chart = await loadChartLib();
+    if (!Chart) throw new Error("charts unavailable");
+    drawSummaryChart(Chart, summaryCanvas, payload);
+    drawBudgetChart(Chart, budgetCanvas, payload);
+    drawReachChart(Chart, reachCanvas, payload);
+    drawFrequencyChart(Chart, freqCanvas, payload);
+    drawWeeklyChart(Chart, weeklyCanvas, payload);
+  } catch (err) {
+    console.warn(err);
+    const fallback = el("div", { class: "fallback" },
+      "⚠️ charts unavailable — Chart.js CDN 無法載入，但表格仍可使用。");
+    section.insertBefore(fallback, hero);
+  }
+}
+
+function drawSummaryChart(Chart, canvas, payload) {
+  const labels = ["Net Reach", "Attentive", "Engagement", "Frequency ×10", "Brand Consid"];
+  const datasets = payload.plans.map((p, i) => ({
+    label: p.name,
+    backgroundColor: colourFor(p.name, i),
+    data: [
+      p.summary.net_reach_pct || 0,
+      (p.summary.net_reach_pct || 0) * 0.7,
+      (p.summary.net_reach_pct || 0) * 0.55,
+      (p.summary.frequency || 0) * 10,
+      p.summary.brand_consideration_pct || 0,
+    ],
+  }));
+  new Chart(canvas, {
+    type: "bar", data: { labels, datasets },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+  });
+}
+
+function drawBudgetChart(Chart, canvas, payload) {
+  const channels = new Set();
+  payload.plans.forEach(p => p.allocations.forEach(a => channels.add(a.channel_id)));
+  const channelList = [...channels];
+  const datasets = channelList.map((ch, i) => ({
+    label: ch,
+    backgroundColor: colourFor(ch, i),
+    data: payload.plans.map(p => {
+      const a = p.allocations.find(x => x.channel_id === ch);
+      return a ? a.total_budget_twd : 0;
+    }),
+  }));
+  new Chart(canvas, {
+    type: "bar",
+    data: { labels: payload.plans.map(p => p.name), datasets },
+    options: {
+      indexAxis: "y", responsive: true,
+      scales: { x: { stacked: true }, y: { stacked: true } },
+      plugins: { legend: { position: "bottom" } },
+    },
+  });
+}
+
+function drawReachChart(Chart, canvas, payload) {
+  const labels = payload.plans.map(p => p.name);
+  const datasets = [
+    { label: "Net Reach %", backgroundColor: PALETTE[0],
+      data: payload.plans.map(p => p.summary.net_reach_pct || 0) },
+    { label: "Attitude %", backgroundColor: PALETTE[1],
+      data: payload.plans.map(p => p.summary.attitude_measures_pct || 0) },
+    { label: "Brand Consid %", backgroundColor: PALETTE[2],
+      data: payload.plans.map(p => p.summary.brand_consideration_pct || 0) },
+    { label: "Knowledge %", backgroundColor: PALETTE[3],
+      data: payload.plans.map(p => p.summary.brand_knowledge_scores_pct || 0) },
+  ];
+  new Chart(canvas, {
+    type: "bar", data: { labels, datasets },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+  });
+}
+
+function drawFrequencyChart(Chart, canvas, payload) {
+  const labels = ["1+", "2+", "3+", "4+", "5+", "6+", "7+", "8+", "9+", "10+"];
+  const datasets = payload.plans.map((p, i) => ({
+    label: p.name,
+    borderColor: colourFor(p.name, i),
+    backgroundColor: colourFor(p.name, i) + "33",
+    fill: false, tension: 0.3,
+    data: (p.frequency_distribution || []).map(row => row.reach_pct),
+  }));
+  new Chart(canvas, {
+    type: "line", data: { labels, datasets },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: "bottom" } },
+      scales: { y: { min: 0, max: 100 } },
+    },
+  });
+}
+
+function drawWeeklyChart(Chart, canvas, payload) {
+  const labels = (payload.plans[0].weekly_grp || []).map(w => `W${w.week}`);
+  const datasets = payload.plans.map((p, i) => ({
+    label: p.name,
+    borderColor: colourFor(p.name, i),
+    backgroundColor: colourFor(p.name, i) + "22",
+    fill: true, tension: 0.25,
+    data: (p.weekly_grp || []).map(w => w.grp),
+  }));
+  new Chart(canvas, {
+    type: "line", data: { labels, datasets },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+  });
+}
 
 /* ---------- Boot ---------- */
 (async function boot() {

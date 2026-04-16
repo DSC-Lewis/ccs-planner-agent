@@ -8,6 +8,8 @@ Living design artefacts for `ccs-planner-agent`.
 | [`TDD.md`](TDD.md) | Iteration 1 test suites TS-1..TS-10. |
 | [`PRD_v2.md`](PRD_v2.md) | **Iteration 2** · Deployment readiness — auth, rate limit, retention (FR-7..9, NFR-3). |
 | [`TDD_v2.md`](TDD_v2.md) | Iteration 2 test suites TS-11..TS-13. |
+| [`PRD_v3.md`](PRD_v3.md) | **Iteration 3** · Plan Comparison UI with Chart.js + freq distribution + duplication matrix (FR-10..14, NFR-4). |
+| [`TDD_v3.md`](TDD_v3.md) | Iteration 3 test suites TS-14..TS-17. |
 
 Both are versioned with the code. When you add a feature:
 
@@ -34,3 +36,7 @@ Both are versioned with the code. When you add a feature:
 | FR-7, NFR-3.2 | TS-11 | [`tests/test_auth_guard.py`](../tests/test_auth_guard.py) |
 | FR-8 | TS-12 | [`tests/test_rate_limit.py`](../tests/test_rate_limit.py) |
 | FR-9, NFR-3.4 | TS-13 | [`tests/test_retention.py`](../tests/test_retention.py) |
+| FR-10 | TS-14 | [`tests/test_frequency_distribution.py`](../tests/test_frequency_distribution.py) |
+| FR-11 | TS-15 | [`tests/test_duplication_matrix.py`](../tests/test_duplication_matrix.py) |
+| FR-12 | TS-16 | [`tests/test_compare_endpoint.py`](../tests/test_compare_endpoint.py) |
+| FR-13, FR-14, NFR-4 | TS-17 | [`tests/test_compare_ui.py`](../tests/test_compare_ui.py) |
