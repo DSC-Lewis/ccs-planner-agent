@@ -55,7 +55,19 @@ const state = {
   opts: {},
   warnings: [],
   plan: null,
+  introShown: {},  // { [sessionId]: true } — fires once per session switch
 };
+
+/* Mode-intro copy. Fires once when the user lands on the first
+ * mode-specific step so they understand what each Agent actually does.
+ * Addresses ivy-deployment feedback: "Manual 跟 Automatic 感覺一樣". */
+const MANUAL_MODE_INTRO =
+  "🧑‍💼 <b>Manual Agent</b> — 你主導。接下來我會把每個 channel × 每週的格子攤給你，"
+  + "逐格填預算（TWD），我即時算 Reach / Frequency / GRP 給你看，完成就產出 <b>Plan 1</b>。";
+const AUTO_MODE_INTRO =
+  "🤖 <b>Automatic Agent</b> — 我主導。接下來你只要告訴我：<b>總預算</b>、"
+  + "哪些 channel 必上（Mandatory）、哪些可選（Optional），以及最佳化目標（Net Reach / Attentive Reach…），"
+  + "我會幫你解最佳化，直接產出 <b>Plan 2</b>。";
 
 /* ---------- DOM helpers ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -522,6 +534,12 @@ function renderChannels(msg) {
 }
 
 function renderCalibration(msg) {
+  // Show the Manual-mode intro on first entry to the manual-specific path.
+  const key = `manual:${state.sessionId}`;
+  if (!state.introShown[key]) {
+    state.introShown[key] = true;
+    botSay(MANUAL_MODE_INTRO);
+  }
   const metrics = state.opts.metrics || {};
   const card = el("div", { class: "card" });
   card.append(el("h5", {}, "Step 7 · Channel Metrics preview"));
@@ -565,7 +583,8 @@ function renderManualPlan(msg) {
   head.append(el("th", { class: "num" }, "Total"));
   tbl.append(el("thead", {}, head));
   const tbody = el("tbody", {});
-  const inputs = {};
+  const inputs = {};        // ch → [<input>]
+  const channelTotals = {}; // ch → <td>
   b.channel_ids.forEach(ch => {
     inputs[ch] = [];
     const tr = el("tr", {}, el("td", {}, ch));
@@ -576,25 +595,33 @@ function renderManualPlan(msg) {
       inputs[ch].push(inp);
       tr.append(el("td", { class: "num" }, inp));
     }
-    tr.append(el("td", { class: "num", id: "tot-" + ch }, "0"));
+    const totCell = el("td", { class: "num" }, "0");
+    channelTotals[ch] = totCell;
+    tr.append(totCell);
     tbody.append(tr);
   });
   tbl.append(tbody);
-  const tfoot = el("tfoot", {}, el("tr", {}, el("th", {}, "Total"),
-    ...Array(weeks).fill(0).map((_, i) => el("th", { class: "num", id: "w-" + i }, "0")),
-    el("th", { class: "num", id: "grand" }, "0")));
-  tbl.append(tfoot);
+  const weekCells = Array(weeks).fill(0).map(() => el("th", { class: "num" }, "0"));
+  const grandCell = el("th", { class: "num" }, "0");
+  tbl.append(el("tfoot", {}, el("tr", {}, el("th", {}, "Total"), ...weekCells, grandCell)));
   card.append(tbl);
+
+  // recompute() writes through *direct* element references — no
+  // document.getElementById. Previously this relied on ids that were
+  // only resolvable after msg.append(card), which ordered the first
+  // recompute() call before the card was in the DOM and silently broke
+  // the whole render (tests/test_manual_plan_render_safety.py).
   function recompute() {
-    let grand = 0; const weekly = new Array(weeks).fill(0);
+    let grand = 0;
+    const weekly = new Array(weeks).fill(0);
     Object.entries(inputs).forEach(([ch, cols]) => {
       let t = 0;
       cols.forEach((inp, i) => { const v = +inp.value || 0; t += v; weekly[i] += v; });
       grand += t;
-      document.getElementById("tot-" + ch).textContent = t.toLocaleString();
+      channelTotals[ch].textContent = t.toLocaleString();
     });
-    weekly.forEach((v, i) => document.getElementById("w-" + i).textContent = v.toLocaleString());
-    document.getElementById("grand").textContent = grand.toLocaleString();
+    weekly.forEach((v, i) => { weekCells[i].textContent = v.toLocaleString(); });
+    grandCell.textContent = grand.toLocaleString();
   }
   recompute();
   msg.append(card);
@@ -613,6 +640,12 @@ function renderManualPlan(msg) {
 }
 
 function renderCriterion(msg) {
+  // Show the Automatic-mode intro on first entry to the automatic-specific path.
+  const key = `auto:${state.sessionId}`;
+  if (!state.introShown[key]) {
+    state.introShown[key] = true;
+    botSay(AUTO_MODE_INTRO);
+  }
   const a = state.session.automatic_input;
   const { criteria = [], strategies = [] } = state.opts;
   const card = el("div", { class: "card" });
