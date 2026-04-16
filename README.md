@@ -52,7 +52,18 @@ open http://localhost:8000
 Hot-reload is enabled, so editing `app/services/*.py` or `app/static/*` triggers
 a rebuild.
 
-### 2. Docker (recommended for pilot deploys)
+### 2a. GCP VM (Debian 12, ~$1/month pilot)
+
+See [`deploy/README_GCP.md`](deploy/README_GCP.md) — one `bootstrap.sh` does
+everything (install Docker, clone, compose up, healthcheck).
+
+```bash
+# After you've created the e2-micro VM:
+gcloud compute ssh "$VM_NAME" --zone=us-central1-a \
+    --command="curl -sSL https://raw.githubusercontent.com/DSC-Lewis/ccs-planner-agent/main/deploy/bootstrap.sh | bash -s -- <ADMIN_KEY>"
+```
+
+### 2b. Docker (recommended for pilot deploys)
 
 ```bash
 docker compose up --build -d
