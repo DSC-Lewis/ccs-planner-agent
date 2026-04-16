@@ -121,6 +121,40 @@ def create_user(req: CreateUserRequest, admin: User = Depends(require_admin)):
             "note": "Store this key NOW — it cannot be retrieved again."}
 
 
+@app.get("/api/users", response_model=List[User])
+def list_users(admin: User = Depends(require_admin)):
+    """Admin-only — no plaintext keys are ever returned."""
+    return storage.list_users()
+
+
+@app.post("/api/users/{user_id}/disable")
+def disable_user(user_id: str, admin: User = Depends(require_admin)):
+    if user_id == admin.id:
+        raise HTTPException(422, "Cannot disable self — you'd lock out admin.")
+    if not storage.get_user(user_id):
+        raise HTTPException(404, f"User '{user_id}' not found.")
+    storage.set_user_active(user_id, False)
+    return {"user_id": user_id, "is_active": False}
+
+
+@app.post("/api/users/{user_id}/enable")
+def enable_user(user_id: str, admin: User = Depends(require_admin)):
+    if not storage.get_user(user_id):
+        raise HTTPException(404, f"User '{user_id}' not found.")
+    storage.set_user_active(user_id, True)
+    return {"user_id": user_id, "is_active": True}
+
+
+@app.post("/api/users/{user_id}/rotate")
+def rotate_user_key(user_id: str, admin: User = Depends(require_admin)):
+    if not storage.get_user(user_id):
+        raise HTTPException(404, f"User '{user_id}' not found.")
+    plain_key = secrets.token_urlsafe(32)
+    storage.rotate_user_key(user_id, plain_key)
+    return {"user_id": user_id, "api_key": plain_key,
+            "note": "Store this key NOW — the old one is now invalid."}
+
+
 # ---------- Projects ----------
 
 @app.get("/api/projects", response_model=List[Project])

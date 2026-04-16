@@ -28,6 +28,17 @@ PORT="${CCS_PORT:-8000}"
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$1"; }
 
 # ----------------------------------------------------------------------------
+# 0. Defensive: regenerate sshd host keys if missing
+# ----------------------------------------------------------------------------
+# Observed on fresh Debian-12 e2-micro images: sshd fails to start on first
+# boot with "no hostkeys available". Idempotent fix.
+if [[ ! -f /etc/ssh/ssh_host_rsa_key ]] && command -v sshd >/dev/null 2>&1; then
+    say "Regenerating missing sshd host keys"
+    sudo ssh-keygen -A
+    sudo systemctl restart ssh || sudo systemctl restart sshd || true
+fi
+
+# ----------------------------------------------------------------------------
 # 1. Install Docker Engine + compose plugin
 # ----------------------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then

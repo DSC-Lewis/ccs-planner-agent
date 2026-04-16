@@ -219,6 +219,7 @@ class User(BaseModel):
     id: str
     name: str
     is_admin: bool = False
+    is_active: bool = True
     created_at: float = 0.0
 
 
