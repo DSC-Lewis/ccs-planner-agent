@@ -993,9 +993,11 @@ function _renderCompareNeedsSecondPlan(plans) {
   const only = plans[0];
   const otherMode = only.kind === "Manual" ? "automatic" : "manual";
   const otherLabel = only.kind === "Manual" ? "Automatic" : "Manual";
-  card.append(el("div", { class: "note" },
-    `你目前只有 <b>${escapeHTML(only.name)} · ${escapeHTML(only.kind)}</b>。Compare 至少需要 2 個。`
-    + ` 最快的做法是把同一份 Brief fork 成 <b>${otherLabel}</b>，讓 CCS Planner 幫你產第二個 plan。`));
+  card.append(el("div", {
+    class: "note",
+    html: `你目前只有 <b>${escapeHTML(only.name)} · ${escapeHTML(only.kind)}</b>。Compare 至少需要 2 個。`
+        + ` 最快的做法是把同一份 Brief fork 成 <b>${escapeHTML(otherLabel)}</b>，讓 CCS Planner 幫你產第二個 plan。`
+  }));
 
   const btns = quickRow([
     { label: `🔄 Fork this brief into ${otherLabel} ▶`, primary: true, value: "fork" },
