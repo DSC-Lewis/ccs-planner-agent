@@ -251,9 +251,8 @@ function renderSidebar() {
     );
     box.append(row);
   });
-  $("#modeLabel").textContent = state.mode === "manual"
-    ? "Manual Mode · 00:00–18:09 對應"
-    : "Automatic Mode · 18:10 後對應";
+  // (Mode copy used to go here — now shown as the active topbar button
+  //  + the Summary pill; don't duplicate it in the sidebar.)
   const pill = $("#modePill");
   pill.textContent = state.mode === "manual" ? "Manual" : "Automatic";
   pill.className = "pill " + (state.mode === "manual" ? "mode-manual" : "mode-auto");
@@ -965,6 +964,68 @@ $("#btnReset").addEventListener("click",  () => {
 
 /* ---------- Compare plans (FR-13..FR-14) ---------- */
 
+/** Compare requires ≥ 2 saved plans. When the user has 0 or 1, give them
+ *  a one-click path to produce the second one — either fork the current
+ *  session into the opposite mode (most common case) or start a fresh
+ *  session when there's no plan at all. */
+function _renderCompareNeedsSecondPlan(plans) {
+  const card = el("div", { class: "card compare-view full" });
+  card.append(el("h5", {}, "📊 想要比較 plans"));
+
+  if (plans.length === 0) {
+    card.append(el("div", { class: "note" },
+      "目前還沒有任何 saved plan。先把一個 Manual 或 Automatic session 跑到最後 (Review step 按 Save) 再回來比較。"));
+    const btns = quickRow([
+      { label: "+ Manual session", primary: true, value: "manual" },
+      { label: "+ Automatic session", value: "automatic" },
+    ], async (mode) => {
+      const projId = state.session?.brief?.project_id
+        || (await api.listProjects())[0]?.id;
+      if (projId) await startNewSessionInProject(projId, mode);
+      else botSay("⚠️ 找不到可用的 project，先去 🏠 Home 建一個。");
+    });
+    card.append(btns);
+    const msg = botSay("⚠️ 沒有 saved plans 可以比較。");
+    msg.append(card);
+    return;
+  }
+
+  const only = plans[0];
+  const otherMode = only.kind === "Manual" ? "automatic" : "manual";
+  const otherLabel = only.kind === "Manual" ? "Automatic" : "Manual";
+  card.append(el("div", { class: "note" },
+    `你目前只有 <b>${escapeHTML(only.name)} · ${escapeHTML(only.kind)}</b>。Compare 至少需要 2 個。`
+    + ` 最快的做法是把同一份 Brief fork 成 <b>${otherLabel}</b>，讓 CCS Planner 幫你產第二個 plan。`));
+
+  const btns = quickRow([
+    { label: `🔄 Fork this brief into ${otherLabel} ▶`, primary: true, value: "fork" },
+    { label: "全新 session", value: "new" },
+  ], async (v) => {
+    if (v === "fork") {
+      // fork from whichever session owns the existing plan.
+      try {
+        const res = await api.fork(only.brief_id, otherMode);
+        state.mode = otherMode;
+        state.sessionId = res.session.id;
+        applyResponse(res);
+        syncModeButtons();
+        scroll.innerHTML = "";
+        botSay(`🔗 Fork 完成，進入 <b>${otherLabel}</b> 流程。跑完後再點 📊 Compare 就能對比兩份 plan。`);
+        renderSidebar();
+        renderSummary();
+        renderStep();
+      } catch (err) { showError(err); }
+    } else {
+      renderProjects();
+    }
+  });
+  card.append(btns);
+
+  const msg = botSay("⚠️ 需要 2 個 plans 才能比較 — 一鍵幫你補：");
+  msg.append(card);
+}
+
+
 async function openComparePicker() {
   let plans;
   try {
@@ -973,8 +1034,10 @@ async function openComparePicker() {
     if (!plans || plans.length < 2) plans = await api.listPlans();
   } catch (e) { showError(e); return; }
 
+  // Not enough plans: instead of a dead-end warning, invite the user to
+  // build the OTHER mode's plan. That's the whole point of Compare.
   if (!plans || plans.length < 2) {
-    botSay("⚠️ 至少要有 2 個 saved plans 才能比較。目前只找到 " + (plans?.length || 0) + " 個。");
+    _renderCompareNeedsSecondPlan(plans || []);
     return;
   }
 
