@@ -114,16 +114,20 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id, archived);
 
 CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    owner_id    TEXT NOT NULL REFERENCES users(id),
-    project_id  TEXT REFERENCES projects(id),
-    mode        TEXT NOT NULL,
-    payload     TEXT NOT NULL,   -- full AgentSession JSON
-    created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL
+    id              TEXT PRIMARY KEY,
+    owner_id        TEXT NOT NULL REFERENCES users(id),
+    project_id      TEXT REFERENCES projects(id),
+    mode            TEXT NOT NULL,
+    payload         TEXT NOT NULL,   -- full AgentSession JSON
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    client_id       TEXT,            -- v6 · denormalised from brief.client_id
+    first_target_id TEXT             -- v6 · denormalised from brief.target_ids[0]
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_scope
+    ON sessions(owner_id, client_id, first_target_id);
 
 CREATE TABLE IF NOT EXISTS plans (
     id          TEXT PRIMARY KEY,
@@ -256,6 +260,56 @@ def init_schema() -> None:
         if "is_active" not in cols:
             c.execute(
                 "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;"
+            )
+
+        # v6 · Issue 14 — denormalise brief.client_id + brief.target_ids[0]
+        # onto the sessions row so banner queries don't need JSON scanning.
+        # Guarded by PRAGMA so this is safe on fresh DBs and pre-v6 ones.
+        sess_cols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "client_id" not in sess_cols:
+            c.execute("ALTER TABLE sessions ADD COLUMN client_id TEXT")
+        if "first_target_id" not in sess_cols:
+            c.execute("ALTER TABLE sessions ADD COLUMN first_target_id TEXT")
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_scope "
+            "ON sessions(owner_id, client_id, first_target_id)"
+        )
+        # Backfill any rows where the columns are still NULL — reads the
+        # JSON payload ONCE per row (old hot path), then never again.
+        rows = c.execute(
+            "SELECT id, payload FROM sessions "
+            "WHERE client_id IS NULL OR first_target_id IS NULL"
+        ).fetchall()
+        for r in rows:
+            try:
+                p = json.loads(r["payload"])
+                brief = p.get("brief") or {}
+                cid = brief.get("client_id")
+                tids = brief.get("target_ids") or []
+                fti = tids[0] if tids else None
+            except (json.JSONDecodeError, TypeError):
+                continue
+            c.execute(
+                "UPDATE sessions SET client_id=?, first_target_id=? WHERE id=?",
+                (cid, fti, r["id"]),
+            )
+        # v6 additive migration: confidence-formula breakdown columns on
+        # calibration_profiles so the frontend tooltip can render sample /
+        # consistency / cv without re-deriving them.
+        prof_cols = [r["name"] for r in c.execute(
+            "PRAGMA table_info(calibration_profiles)"
+        ).fetchall()]
+        if "sample_factor" not in prof_cols:
+            c.execute(
+                "ALTER TABLE calibration_profiles ADD COLUMN sample_factor REAL NOT NULL DEFAULT 0;"
+            )
+        if "consistency_factor" not in prof_cols:
+            c.execute(
+                "ALTER TABLE calibration_profiles ADD COLUMN consistency_factor REAL NOT NULL DEFAULT 0;"
+            )
+        if "cv" not in prof_cols:
+            c.execute(
+                "ALTER TABLE calibration_profiles ADD COLUMN cv REAL NOT NULL DEFAULT 0;"
             )
 
 
@@ -476,13 +530,20 @@ def save_session(session: AgentSession, *, owner_id: str,
                 project_id = ensure_default_project(owner_id).id
         payload = json.dumps(session.model_dump(mode="json"),
                              ensure_ascii=False)
+        # v6 · Issue 14 — denormalise scope columns for cheap banner lookups.
+        client_id = session.brief.client_id
+        first_target_id = (session.brief.target_ids or [None])[0] \
+            if session.brief.target_ids else None
         c.execute(
             "INSERT INTO sessions(id, owner_id, project_id, mode, payload, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "created_at, updated_at, client_id, first_target_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, "
-            "updated_at=excluded.updated_at, project_id=excluded.project_id",
+            "updated_at=excluded.updated_at, project_id=excluded.project_id, "
+            "client_id=excluded.client_id, "
+            "first_target_id=excluded.first_target_id",
             (session.id, owner_id, project_id, session.mode.value, payload,
-             created_at, now),
+             created_at, now, client_id, first_target_id),
         )
         _sweep_stale(keep_session_id=session.id)
         return session
@@ -816,22 +877,20 @@ def count_actuals_for_client_target(client_id: str, target_id: str,
     """Used by the banner-coverage endpoint. Counts distinct plans under
     ``(client_id, target_id)`` with at least one actuals record.
 
-    Uses the session payload JSON to read ``brief.client_id`` and
-    ``brief.target_ids`` — not indexable, but ivy-scale is tiny."""
-    rows = _conn().execute(
-        "SELECT DISTINCT s.payload FROM sessions s "
+    v6 · Issue 14 — uses the denormalised ``sessions.client_id`` +
+    ``sessions.first_target_id`` columns (populated on every save; backfilled
+    in ``init_schema``) to avoid JSON-decoding every session row. Matches the
+    v6 calibration fan-out semantics, which also key on the brief's first
+    target id only.
+    """
+    row = _conn().execute(
+        "SELECT COUNT(DISTINCT p.id) AS n FROM sessions s "
         "JOIN plans p ON p.brief_id = s.id "
         "JOIN plan_actuals pa ON pa.plan_id = p.id "
-        "WHERE s.owner_id = ?",
-        (owner_id,),
-    ).fetchall()
-    n = 0
-    for r in rows:
-        sp = json.loads(r["payload"])
-        brief = sp.get("brief") or {}
-        if brief.get("client_id") == client_id and target_id in (brief.get("target_ids") or []):
-            n += 1
-    return n
+        "WHERE s.owner_id = ? AND s.client_id = ? AND s.first_target_id = ?",
+        (owner_id, client_id, target_id),
+    ).fetchone()
+    return int(row["n"] or 0) if row else 0
 
 
 # ---------- Legacy JSON migration ----------

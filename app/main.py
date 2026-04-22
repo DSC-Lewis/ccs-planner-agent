@@ -519,17 +519,42 @@ def list_calibration_observations(
     metric: Optional[str] = None,
     user: User = Depends(current_user),
 ):
+    # v6 · FR-30 · issue 7 — enrich each row with its currently-contributing
+    # weight so the observation drawer can show "this row is worth X right
+    # now" without mentally computing 2^(-age/half_life).
+    import time as _time
     rows = calibration_service.list_observations(
         client_id=client_id, target_id=target_id,
         channel_id=channel_id, owner_id=user.id,
         metric=metric,
     )
-    return [r.model_dump(mode="json") for r in rows]
+    half_life = calibration_service.effective_half_life(
+        owner_id=user.id, client_id=client_id,
+        target_id=target_id, channel_id=channel_id,
+    )
+    now_ts = _time.time()
+    enriched = []
+    for r in rows:
+        d = r.model_dump(mode="json")
+        d["effective_weight"] = calibration_service.compute_effective_weight(
+            r, half_life,
+        )
+        d["age_days"] = max(0.0, (now_ts - float(r.observed_at)) / 86400.0)
+        enriched.append(d)
+    return enriched
 
 
 @app.patch("/api/calibration/observations/{obs_id}")
 def patch_calibration_observation(obs_id: str, body: ObservationWeightPatch,
                                   user: User = Depends(current_user)):
+    # v6 · FR-30 · issue 13 — validate range before persisting. None is
+    # still accepted (means "clear the override, fall back to decay").
+    if body.weight_override is not None and (
+        body.weight_override < 0 or body.weight_override > 1
+    ):
+        raise HTTPException(
+            422, "weight_override must be in [0, 1] or null to clear"
+        )
     ok = calibration_service.set_observation_weight(
         owner_id=user.id, observation_id=obs_id,
         weight_override=body.weight_override,
@@ -537,6 +562,59 @@ def patch_calibration_observation(obs_id: str, body: ObservationWeightPatch,
     if not ok:
         raise HTTPException(404, "Observation not found")
     return {"id": obs_id, "weight_override": body.weight_override}
+
+
+# ---------- Calibration channel summary (v6 · CAL pill data) ----------
+
+@app.get("/api/calibration/channel-summary")
+def calibration_channel_summary(client_id: str, target_id: str,
+                                user: User = Depends(current_user)):
+    """CAL-pill data source. Per-channel summary of calibration state for
+    the given (client_id, target_id) scope, owned by the calling user.
+
+    For every known channel id we return:
+      * ``has_profile`` — True iff ANY metric has at least one observation.
+      * ``confidence_score`` — max score across tracked metrics (matches
+        the banner's aggregate logic); None when no profile exists.
+      * ``bucket`` — traffic-light bucket (high/mid/low) via
+        :func:`calibration.confidence_bucket`; None when no profile.
+      * ``metrics`` — list of metric keys with n_raw >= 1.
+    """
+    profiles = [p for p in calibration_service.list_profiles(user.id)
+                if p.client_id == client_id and p.target_id == target_id]
+    by_channel: dict = {}
+    for p in profiles:
+        if p.n_raw < 1:
+            continue
+        slot = by_channel.setdefault(p.channel_id, {
+            "metrics": [], "max_score": 0,
+        })
+        if p.metric not in slot["metrics"]:
+            slot["metrics"].append(p.metric)
+        if p.confidence_score > slot["max_score"]:
+            slot["max_score"] = p.confidence_score
+
+    out: dict = {}
+    for ch in reference.all_channel_ids():
+        slot = by_channel.get(ch)
+        if slot and slot["metrics"]:
+            score = int(slot["max_score"])
+            out[ch] = {
+                "has_profile": True,
+                "confidence_score": score,
+                "bucket": calibration_service.confidence_bucket(
+                    score, owner_id=user.id,
+                ),
+                "metrics": slot["metrics"],
+            }
+        else:
+            out[ch] = {
+                "has_profile": False,
+                "confidence_score": None,
+                "bucket": None,
+                "metrics": [],
+            }
+    return out
 
 
 @app.post("/api/plans/compare")

@@ -224,7 +224,9 @@ def _apply_optimize(session: AgentSession, payload: StepPayload,
                     *, owner_id: str) -> None:
     """Trigger the optimization. The plan is computed + persisted here so the
     REVIEW step can show it."""
-    plan = optimizer.compute_automatic_plan(session.brief, session.automatic_input)
+    plan = optimizer.compute_automatic_plan(
+        session.brief, session.automatic_input, owner_id=owner_id,
+    )
     plan.brief_id = session.brief.id or session.id
     plan.name = "Plan 2"
     saved = storage.save_plan(plan, owner_id=owner_id)
@@ -379,7 +381,9 @@ def advance(session: AgentSession, payload: StepPayload, *,
 
     # After manual_plan we also compute & save the plan
     if session.mode == SessionMode.MANUAL and session.step == StepKey.REVIEW and not session.plan_id:
-        plan = optimizer.compute_manual_plan(session.brief, session.manual_input)
+        plan = optimizer.compute_manual_plan(
+            session.brief, session.manual_input, owner_id=owner_id,
+        )
         plan.brief_id = session.brief.id or session.id
         plan.name = "Plan 1"
         saved = storage.save_plan(plan, owner_id=owner_id)

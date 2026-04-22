@@ -2242,4 +2242,903 @@ document.addEventListener("click", (e) => {
   if (t.id === "btnLogout") { setApiKey(""); bootApp(); }
 });
 
+/* ========================================================================
+ * v6 · PR C — Frontend UX completion (overrides modal, CAL pill, chart,
+ *             scope overrides, rich tooltip, history viewer, quality)
+ * ====================================================================== */
+
+/* ---------- Issue 16: render-epoch staleness guard ---------- */
+state._renderEpoch = 0;
+function _bumpEpoch() { state._renderEpoch = (state._renderEpoch | 0) + 1; return state._renderEpoch; }
+
+/* Wrap top-level render entry points so every async continuation can
+ * compare its captured epoch against state._renderEpoch and bail when
+ * the user has navigated away. We only retrofit checks into NEW async
+ * continuations below; existing renderers keep working unchanged. */
+(function _wrapTopLevelRendersForEpoch() {
+  const wrap = (name) => {
+    const fn = window[name];
+    if (typeof fn !== "function") return;
+    window[name] = function (...args) {
+      _bumpEpoch();
+      return fn.apply(this, args);
+    };
+  };
+  wrap("renderProjects");
+  wrap("renderProjectDetail");
+  wrap("renderPlanReport");
+  wrap("renderCompare");
+  wrap("renderHistory");
+  wrap("renderStep");
+})();
+
+/* ---------- Issue 2: Channel overrides modal ---------- */
+
+// Per-row editable field list (CPM, Pen%, Reach%, BuyingAud, Impressions).
+const _OVERRIDE_FIELDS = [
+  ["cpm_twd",             "CPM (TWD)",          1,    "CPM"],
+  ["penetration_pct",     "Penetration %",      0.1,  "Pen%"],
+  ["net_reach_pct",       "Net Reach %",        0.1,  "Reach%"],
+  ["buying_audience_000", "Buying Audience (千人)", 1, "BA"],
+  ["impressions",         "Impressions",        1000, "Impr"],
+];
+
+/** Open the overrides editor for the current session. Returns a Promise
+ *  that resolves once the modal is dismissed (saved OR cancelled) so
+ *  callers (e.g. the recommend-fill banner) can chain on close.
+ *
+ *  @param {object} session  Must carry brief.channel_ids, brief.client_id,
+ *                            brief.target_ids, and optional brief.overrides.
+ */
+async function openOverridesModal(session) {
+  return new Promise(async (resolve) => {
+    const brief = session?.brief || {};
+    const channels = brief.channel_ids || [];
+    const clientId = brief.client_id;
+    const targetId = (brief.target_ids || [])[0];
+
+    // Defaults — prefer calibrated values if we have profiles, otherwise
+    // fall back to the static reference CCS CPM / penetration.
+    let calSummary = {};
+    let refMetrics = {};
+    try {
+      if (clientId && targetId) {
+        calSummary = await apiFetch(
+          `/api/calibration/channel-summary?client_id=${encodeURIComponent(clientId)}` +
+          `&target_id=${encodeURIComponent(targetId)}`
+        ).then(r => r.ok ? r.json() : {});
+      }
+    } catch (_) { /* best-effort */ }
+    try {
+      const refResp = await apiFetch("/api/reference/channels").then(r => r.json());
+      refMetrics = refResp?.metrics || {};
+    } catch (_) { /* best-effort */ }
+
+    // Also fetch calibrated profiles so we can surface CAL: <num> defaults.
+    let calProfiles = {};
+    try {
+      const rows = await apiFetch("/api/calibration/profiles").then(r => r.json());
+      (rows || []).forEach(p => {
+        if (clientId && targetId
+            && p.client_id === clientId && p.target_id === targetId) {
+          calProfiles[`${p.channel_id}__${p.metric}`] = p;
+        }
+      });
+    } catch (_) { /* best-effort */ }
+
+    const overlay = el("div", {
+      style: "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;" +
+             "display:flex;align-items:center;justify-content:center",
+    });
+    const modal = el("div", {
+      style: "background:#fff;border-radius:12px;padding:20px;width:min(1040px,94vw);" +
+             "max-height:90vh;overflow:auto",
+    });
+
+    const close = (_reason) => { overlay.remove(); resolve(); };
+    modal.append(
+      el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" },
+        el("h3", { style: "margin:0" }, "✏️ 調整預設值 (CPM / Penetration / Reach / 人數 / Impressions)"),
+        el("button", {
+          style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+          onclick: () => close("close-x"),
+        }, "✕")),
+      el("p", { style: "margin:0 0 10px;color:#6B7280;font-size:13px" },
+        "留空=沿用系統預設；填入=以此覆寫。粗體代表目前有 override。"),
+    );
+
+    const tbl = el("table", { class: "tbl", style: "width:100%" });
+    const head = el("tr", {}, el("th", {}, "Channel"));
+    _OVERRIDE_FIELDS.forEach(([, label]) => head.append(el("th", { class: "num" }, label)));
+    head.append(el("th", {}, ""));
+    tbl.append(el("thead", {}, head));
+    const tbody = el("tbody", {});
+
+    const rowInputs = {};  // channel -> { field -> <input> }
+    const defaultCells = {}; // channel -> { field -> <span> }
+
+    channels.forEach(ch => {
+      const tr = el("tr", { "data-override-row": ch });
+      tr.append(el("td", {}, ch));
+      rowInputs[ch] = {};
+      defaultCells[ch] = {};
+      const existingOv = (brief.overrides || {})[ch] || {};
+
+      _OVERRIDE_FIELDS.forEach(([field, , step]) => {
+        const hasCal = calSummary[ch]?.has_profile;
+        const calProfile = calProfiles[`${ch}__${field}`];
+        let defaultText = "—";
+        if (calProfile && calProfile.value_mean_weighted != null) {
+          defaultText = `CAL: ${Number(calProfile.value_mean_weighted).toFixed(2)}`;
+        } else {
+          // Static reference fallback.
+          const m = refMetrics[ch] || {};
+          if (field === "cpm_twd" && m.cpm_twd != null)
+            defaultText = `${Number(m.cpm_twd).toFixed(2)}`;
+          else if (field === "penetration_pct" && m.penetration_pct != null)
+            defaultText = `${Number(m.penetration_pct).toFixed(2)}%`;
+          else if (field === "net_reach_pct" && m.penetration_pct != null)
+            defaultText = "—";
+        }
+        const defSpan = el("div", {
+          style: "font-size:10px;color:#9CA3AF;margin-bottom:2px",
+        }, defaultText);
+        defaultCells[ch][field] = defSpan;
+
+        const current = existingOv[field];
+        const input = el("input", {
+          type: "number", step: String(step), min: "0",
+          value: current == null ? "" : String(current),
+          style: "width:100%;padding:4px 6px;border:1px solid #E5E7EB;border-radius:6px;font-size:12px"
+            + (current != null ? ";font-weight:700" : ""),
+        });
+        input.addEventListener("input", () => {
+          input.style.fontWeight = input.value === "" ? "normal" : "700";
+        });
+        rowInputs[ch][field] = input;
+
+        tr.append(el("td", { class: "num" }, defSpan, input));
+      });
+
+      // Clear row button.
+      const clearBtn = el("button", {
+        style: "padding:3px 8px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;font-size:11px",
+        onclick: () => {
+          Object.values(rowInputs[ch]).forEach(inp => {
+            inp.value = "";
+            inp.style.fontWeight = "normal";
+          });
+        },
+      }, "清除");
+      tr.append(el("td", {}, clearBtn));
+      tbody.append(tr);
+    });
+    tbl.append(tbody);
+    modal.append(tbl);
+
+    // Save / cancel footer
+    const saveBtn = el("button", {
+      style: "padding:8px 18px;border:0;background:#10B981;color:#fff;border-radius:999px;cursor:pointer;font-weight:600",
+      onclick: async () => {
+        const overrides = {};
+        channels.forEach(ch => {
+          const row = {};
+          let any = false;
+          _OVERRIDE_FIELDS.forEach(([field]) => {
+            const v = rowInputs[ch][field].value;
+            if (v !== "") { row[field] = Number(v); any = true; }
+          });
+          if (any) overrides[ch] = row;
+        });
+        try {
+          await api.advance(state.sessionId, { overrides });
+          // Sticky override payloads don't change the step; refresh brief locally.
+          if (state.session?.brief) state.session.brief.overrides = overrides;
+          botSay(`✅ 已儲存 ${Object.keys(overrides).length} 個 channel 的 override。`);
+        } catch (e) { showError(e); }
+        close("save");
+      },
+    }, "儲存");
+    const cancelBtn = el("button", {
+      style: "margin-left:8px;padding:8px 18px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer",
+      onclick: () => close("cancel"),
+    }, "取消");
+    modal.append(el("div", { style: "margin-top:14px;display:flex;justify-content:flex-end" }, cancelBtn, saveBtn));
+
+    overlay.append(modal);
+    document.body.append(overlay);
+  });
+}
+
+/* ---------- Issue 3: CAL pill on Channel step ---------- */
+
+const _CAL_PILL_BG = { high: "#10B981", mid: "#F59E0B", low: "#EF4444" };
+
+async function _attachCalPills(card, brief) {
+  if (!brief?.client_id || !(brief.target_ids || []).length) return;
+  const targetId = brief.target_ids[0];
+  const epoch = state._renderEpoch;
+  let summary = {};
+  try {
+    const r = await apiFetch(
+      `/api/calibration/channel-summary?client_id=${encodeURIComponent(brief.client_id)}` +
+      `&target_id=${encodeURIComponent(targetId)}`
+    );
+    if (!r.ok) return;
+    summary = await r.json();
+  } catch (_) { return; }
+  if (epoch !== state._renderEpoch) return;
+  let settings = {};
+  try {
+    settings = await apiFetch("/api/calibration/settings").then(r => r.json());
+  } catch (_) { settings = {}; }
+  if (epoch !== state._renderEpoch) return;
+
+  card.querySelectorAll("input[type=checkbox]").forEach(cb => {
+    const info = summary[cb.value];
+    if (!info || !info.has_profile) return;
+    const score = info.confidence_score != null ? info.confidence_score : 0;
+    const bucket = info.bucket || _bucketForScore(score, settings?.global?.thresholds);
+    const pill = el("span", {
+      class: `cal-pill confidence-${bucket}`,
+      title: `Calibrated · score ${score}`,
+      style: `display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;`
+           + `background:${_CAL_PILL_BG[bucket] || "#9CA3AF"};color:#fff;font-size:10px;font-weight:700`,
+    }, `CAL · ${score}`);
+    // Insert after label text (the parent label contains cb + text).
+    cb.parentNode?.append(pill);
+  });
+}
+
+/* ---------- Issue 2b: wire overrides button into renderChannels + renderReview ---------- */
+
+const _origRenderChannelsPRC = renderChannels;
+renderChannels = function(msg) {
+  _origRenderChannelsPRC(msg);
+  const card = msg.querySelector(".card");
+  if (!card) return;
+  // Attach CAL pills for each calibrated channel (Issue 3).
+  _attachCalPills(card, state.session?.brief);
+  // Inject the "✏️ 調整預設值" button inside the card header area.
+  const btn = el("button", {
+    style: "margin-left:8px;padding:4px 10px;border:1px solid #8B5CF6;background:#fff;"
+         + "color:#8B5CF6;border-radius:999px;cursor:pointer;font-size:12px",
+    onclick: () => openOverridesModal(state.session),
+  }, "✏️ 調整預設值");
+  const header = card.querySelector("h5");
+  if (header) header.append(btn);
+};
+
+const _origRenderReviewPRC = renderReview;
+renderReview = function(msg) {
+  _origRenderReviewPRC(msg);
+  const card = msg.querySelector(".card");
+  if (!card) return;
+  const btn = el("button", {
+    style: "margin-top:8px;padding:6px 12px;border:1px solid #8B5CF6;background:#fff;"
+         + "color:#8B5CF6;border-radius:999px;cursor:pointer;font-size:12px",
+    onclick: () => openOverridesModal(state.session),
+  }, "✏️ 調整 CPM/Penetration");
+  card.append(btn);
+};
+
+/* ---------- Issue 6: replace the Fill-Now banner CTA to call overrides modal ---------- */
+
+const _origMaybeShowBanner = maybeShowRecommendFillBanner;
+maybeShowRecommendFillBanner = async function(card) {
+  const b = state.session?.brief;
+  if (!b?.client_id || !(b.target_ids || []).length) return;
+  if (state.bannerDismissed) return;
+  const target = b.target_ids[0];
+  try {
+    const r = await apiFetch(
+      `/api/calibration/coverage?client_id=${encodeURIComponent(b.client_id)}` +
+      `&target_id=${encodeURIComponent(target)}`
+    );
+    const body = await r.json();
+    if (body.has_history) return;
+  } catch (_) { return; }
+
+  const banner = el("div", {
+    class: "card recommend-fill-banner",
+    style: "background:#FFFBEB;border:1px solid #F59E0B;margin:8px 0;padding:10px 12px",
+  });
+  banner.append(
+    el("div", { style: "font-weight:700;color:#92400E;margin-bottom:4px" },
+       RECOMMEND_FILL_BANNER.headline),
+    el("div", { style: "font-size:13px;color:#7C2D12;margin-bottom:6px" },
+       RECOMMEND_FILL_BANNER.body),
+    el("div", { style: "display:flex;gap:8px" },
+      el("button", {
+        style: "padding:6px 12px;border-radius:999px;border:0;background:#F59E0B;color:#fff;cursor:pointer",
+        onclick: async () => {
+          // Issue 6: jump straight to overrides modal; banner goes away.
+          await openOverridesModal(state.session);
+          banner.remove();
+          state.bannerDismissed = true;
+        },
+      }, RECOMMEND_FILL_BANNER.cta),
+      el("button", {
+        style: "padding:6px 12px;border-radius:999px;border:1px solid #E5E7EB;background:#fff;cursor:pointer",
+        onclick: () => { state.bannerDismissed = true; banner.remove(); },
+      }, "本次先跳過"),
+    ),
+  );
+  card.parentNode?.insertBefore(banner, card);
+};
+
+/* ---------- Issue 4: Chart.js bar chart in renderPlanReport ---------- */
+
+async function _injectReportChart(plan) {
+  const epoch = state._renderEpoch;
+  // Fetch report fresh rather than trying to parse DOM tables.
+  let report;
+  try {
+    report = await apiFetch(`/api/plans/${plan.id}/report`).then(r => r.json());
+  } catch (_) { return; }
+  if (epoch !== state._renderEpoch) return;
+  if (!report || report.status === "no_actuals" || !report.per_channel) return;
+
+  // Find the rendered report card in scroll.
+  const card = scroll.querySelector(".compare-view.full");
+  if (!card) return;
+
+  // Insert the chart canvas above the existing table (fallback remains visible).
+  const canvas = el("canvas", {
+    id: "chart-report-spend",
+    style: "max-height:280px;margin-bottom:10px",
+  });
+  const chartWrap = el("div", { class: "card report-chart" },
+    el("h5", { style: "margin:0 0 6px" }, "Planned vs Actual Spend"),
+    canvas);
+  // Insert before the first table.
+  const firstTable = card.querySelector("table.tbl");
+  if (firstTable) card.insertBefore(chartWrap, firstTable);
+  else card.prepend(chartWrap);
+
+  // Also extend the aggregate panel with CPM + Impressions variance.
+  const agg = report.aggregate || {};
+  // Weighted rollups (by planned spend) so numbers stay sane when the
+  // backend doesn't already include them.
+  let cpmVarAgg = agg.cpm_variance_pct;
+  let imprVarAgg = agg.impressions_variance_pct;
+  if (cpmVarAgg == null || imprVarAgg == null) {
+    let wSum = 0, cpmAcc = 0, imprAcc = 0;
+    (report.per_channel || []).forEach(r => {
+      const w = Number(r.planned_spend_twd || 0);
+      if (!(w > 0)) return;
+      wSum += w;
+      if (r.cpm_variance_pct != null) cpmAcc += w * Number(r.cpm_variance_pct);
+      if (r.impressions_variance_pct != null)
+        imprAcc += w * Number(r.impressions_variance_pct);
+    });
+    if (wSum > 0) {
+      if (cpmVarAgg == null) cpmVarAgg = cpmAcc / wSum;
+      if (imprVarAgg == null) imprVarAgg = imprAcc / wSum;
+    }
+  }
+
+  // Append extra variance rows to the summary panel (the greyish box).
+  const summary = [...card.querySelectorAll("div")].reverse().find(d =>
+    d.style && d.style.background && d.style.background.indexOf("F6F8FA") !== -1);
+  if (summary) {
+    if (cpmVarAgg != null && !summary.dataset.cpmInjected) {
+      summary.dataset.cpmInjected = "1";
+      summary.append(el("div", {},
+        `CPM Variance: ${(cpmVarAgg >= 0 ? "+" : "") + Number(cpmVarAgg).toFixed(1)}%`));
+    }
+    if (imprVarAgg != null && !summary.dataset.imprInjected) {
+      summary.dataset.imprInjected = "1";
+      summary.append(el("div", {},
+        `Impressions Variance: ${(imprVarAgg >= 0 ? "+" : "") + Number(imprVarAgg).toFixed(1)}%`));
+    }
+  }
+
+  // Load Chart.js (lazy); fall back silently if offline.
+  try {
+    const Chart = await loadChartLib();
+    if (!Chart) return;
+    if (epoch !== state._renderEpoch) return;
+    const labels = report.per_channel.map(r => r.channel_id);
+    const planned = report.per_channel.map(r => Math.round(r.planned_spend_twd || 0));
+    const actual = report.per_channel.map(r => Math.round(r.actual_spend_twd || 0));
+    new Chart(canvas, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          { label: "Planned Spend", backgroundColor: PALETTE[0], data: planned },
+          { label: "Actual Spend",  backgroundColor: PALETTE[2], data: actual  },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: "bottom" }, title: { display: false } },
+        scales: { y: { beginAtZero: true } },
+      },
+    });
+  } catch (err) {
+    console.warn("Report chart failed — table fallback remains", err);
+  }
+}
+
+const _origRenderPlanReportPRC = renderPlanReport;
+renderPlanReport = async function(plan) {
+  const epoch = _bumpEpoch();
+  await _origRenderPlanReportPRC(plan);
+  if (epoch !== state._renderEpoch) return;
+  // Inject chart + variance stats (Issue 4). Guarded by epoch so the
+  // async continuation can't touch DOM after navigation.
+  _injectReportChart(plan);
+};
+
+/* ---------- Issue 5: per-client + per-channel half-life override forms ---------- */
+
+async function _renderScopeOverrideForms(body, settings, profiles) {
+  // Derive unique clients / (client,target) / (client,target,channel) from profiles.
+  const clients = [...new Set((profiles || []).map(p => p.client_id))].sort();
+  const perClient = (settings.per_client || []);
+  const perChannel = (settings.per_channel || []);
+
+  // --- Per-client form ---
+  const pcTitle = el("h5", { style: "margin:16px 0 6px" }, "per-client half-life override");
+  body.append(pcTitle);
+  const pcForm = el("div", { style: "display:flex;gap:6px;align-items:center;margin-bottom:6px" });
+  const pcClient = el("select", { style: "padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" },
+    el("option", { value: "" }, "選擇 client…"),
+    ...clients.map(c => el("option", { value: c }, c))
+  );
+  const pcDays = el("input", { type: "number", min: "1", step: "1", placeholder: "days", style: "width:90px;padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" });
+  const pcAdd = el("button", {
+    style: "padding:4px 12px;border:0;background:#8B5CF6;color:#fff;border-radius:999px;cursor:pointer;font-size:12px",
+    onclick: async () => {
+      if (!pcClient.value || !Number(pcDays.value)) return;
+      await apiFetch("/api/calibration/settings", {
+        method: "PUT",
+        body: JSON.stringify({ scope: "client", client_id: pcClient.value, half_life_days: Number(pcDays.value) }),
+      });
+      botSay(`已新增 per-client override · ${pcClient.value} = ${pcDays.value} 天.`);
+      _reopenCalibrationSettings();
+    },
+  }, "新增 override");
+  pcForm.append(pcClient, pcDays, pcAdd);
+  body.append(pcForm);
+  // Existing per-client overrides table.
+  if (perClient.length) {
+    const tbl = el("table", { class: "tbl" });
+    tbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Client"),
+      el("th", { class: "num" }, "half-life (days)"),
+      el("th", {}, ""),
+    )));
+    const tb = el("tbody", {});
+    perClient.forEach(r => {
+      tb.append(el("tr", {},
+        el("td", {}, r.client_id),
+        el("td", { class: "num" }, String(r.half_life_days)),
+        el("td", {}, el("button", {
+          style: "padding:3px 10px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;font-size:11px",
+          onclick: async () => {
+            await apiFetch(`/api/calibration/settings?scope=client&client_id=${encodeURIComponent(r.client_id)}`, { method: "DELETE" });
+            botSay(`已還原 per-client override (${r.client_id}).`);
+            _reopenCalibrationSettings();
+          },
+        }, "還原")),
+      ));
+    });
+    tbl.append(tb);
+    body.append(tbl);
+  }
+
+  // --- Per-channel form ---
+  body.append(el("h5", { style: "margin:16px 0 6px" }, "per-channel half-life override"));
+  // Build dropdowns from profiles.
+  const byClient = {};
+  (profiles || []).forEach(p => {
+    const c = byClient[p.client_id] || (byClient[p.client_id] = {});
+    const t = c[p.target_id] || (c[p.target_id] = new Set());
+    t.add(p.channel_id);
+  });
+  const pchForm = el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px" });
+  const pchClient = el("select", { style: "padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" },
+    el("option", { value: "" }, "client…"),
+    ...Object.keys(byClient).sort().map(c => el("option", { value: c }, c))
+  );
+  const pchTarget = el("select", { style: "padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" },
+    el("option", { value: "" }, "target…")
+  );
+  const pchChannel = el("select", { style: "padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" },
+    el("option", { value: "" }, "channel…")
+  );
+  const pchDays = el("input", { type: "number", min: "1", step: "1", placeholder: "days", style: "width:90px;padding:4px 8px;border:1px solid #E5E7EB;border-radius:6px" });
+  pchClient.addEventListener("change", () => {
+    pchTarget.innerHTML = "";
+    pchTarget.append(el("option", { value: "" }, "target…"));
+    const tmap = byClient[pchClient.value] || {};
+    Object.keys(tmap).sort().forEach(t =>
+      pchTarget.append(el("option", { value: t }, t)));
+    pchChannel.innerHTML = "";
+    pchChannel.append(el("option", { value: "" }, "channel…"));
+  });
+  pchTarget.addEventListener("change", () => {
+    pchChannel.innerHTML = "";
+    pchChannel.append(el("option", { value: "" }, "channel…"));
+    const chs = (byClient[pchClient.value] || {})[pchTarget.value];
+    if (chs) [...chs].sort().forEach(c => pchChannel.append(el("option", { value: c }, c)));
+  });
+  const pchAdd = el("button", {
+    style: "padding:4px 12px;border:0;background:#8B5CF6;color:#fff;border-radius:999px;cursor:pointer;font-size:12px",
+    onclick: async () => {
+      if (!pchClient.value || !pchTarget.value || !pchChannel.value || !Number(pchDays.value)) return;
+      await apiFetch("/api/calibration/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          scope: "channel", client_id: pchClient.value,
+          target_id: pchTarget.value, channel_id: pchChannel.value,
+          half_life_days: Number(pchDays.value),
+        }),
+      });
+      botSay(`已新增 per-channel override · ${pchChannel.value} = ${pchDays.value} 天.`);
+      _reopenCalibrationSettings();
+    },
+  }, "新增 override");
+  pchForm.append(pchClient, pchTarget, pchChannel, pchDays, pchAdd);
+  body.append(pchForm);
+  if (perChannel.length) {
+    const tbl = el("table", { class: "tbl" });
+    tbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Client"), el("th", {}, "Target"), el("th", {}, "Channel"),
+      el("th", { class: "num" }, "half-life (days)"), el("th", {}, ""),
+    )));
+    const tb = el("tbody", {});
+    perChannel.forEach(r => {
+      tb.append(el("tr", {},
+        el("td", {}, r.client_id),
+        el("td", {}, r.target_id),
+        el("td", {}, r.channel_id),
+        el("td", { class: "num" }, String(r.half_life_days)),
+        el("td", {}, el("button", {
+          style: "padding:3px 10px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;font-size:11px",
+          onclick: async () => {
+            const url = `/api/calibration/settings?scope=channel`
+                      + `&client_id=${encodeURIComponent(r.client_id)}`
+                      + `&target_id=${encodeURIComponent(r.target_id)}`
+                      + `&channel_id=${encodeURIComponent(r.channel_id)}`;
+            await apiFetch(url, { method: "DELETE" });
+            botSay("已還原 per-channel override.");
+            _reopenCalibrationSettings();
+          },
+        }, "還原")),
+      ));
+    });
+    tbl.append(tb);
+    body.append(tbl);
+  }
+}
+
+function _reopenCalibrationSettings() {
+  // Close any open overlay + re-open.
+  document.querySelectorAll("[data-cal-settings-overlay]").forEach(x => x.remove());
+  openCalibrationSettings();
+}
+
+/* ---------- Issue 5 + 7 + 8 — wrap openCalibrationSettings ---------- */
+
+const _origOpenCalibrationSettings = openCalibrationSettings;
+openCalibrationSettings = async function() {
+  await _origOpenCalibrationSettings();
+  // Tag the overlay for _reopenCalibrationSettings + scope-form injection.
+  const overlays = document.querySelectorAll("body > div");
+  const target = overlays[overlays.length - 1];
+  if (!target) return;
+  target.setAttribute("data-cal-settings-overlay", "1");
+
+  // Wait a tick for the refresh() inside the inner function to populate
+  // the body, then tack on our per-client/per-channel forms.
+  const inner = target.querySelector("div");
+  if (!inner) return;
+
+  // Poll very briefly (should resolve within a tick once fetch resolves).
+  const waitBodyReady = async () => {
+    for (let i = 0; i < 40; i++) {
+      const scopeHook = inner.querySelector("h5");
+      if (scopeHook) return inner;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return inner;
+  };
+  const body = await waitBodyReady();
+
+  try {
+    const settings = await apiFetch("/api/calibration/settings").then(r => r.json());
+    const profiles = await apiFetch("/api/calibration/profiles").then(r => r.json());
+    // Issue 5: per-client + per-channel forms.
+    const scopeBox = el("div", { "data-scope-forms": "1" });
+    await _renderScopeOverrideForms(scopeBox, settings, profiles);
+    body.append(scopeBox);
+
+    // Issue 7: enrich observation drawer (monkey-patch the open click).
+    // Issue 8: enrich confidence badge tooltip.
+    _enhanceProfileBadgesWithTooltip(body, profiles, settings);
+    _enhanceObservationDrawerButtons(body, profiles);
+  } catch (e) { console.warn("PR C settings enrichment failed", e); }
+};
+
+/* ---------- Issue 8: rich tooltip panel on confidence badge click ---------- */
+
+function _confidencePanel(profile) {
+  const sample = Number(profile.sample_factor || 0);
+  const consistency = Number(profile.consistency_factor || 0);
+  const cv = Number(profile.cv || 0);
+  const nEff = Number(profile.n_effective || 0);
+  const score = Number(profile.confidence_score || 0);
+  const panel = el("div", {
+    class: "confidence-tooltip",
+    style: "position:absolute;z-index:2000;background:#fff;border:1px solid #E5E7EB;"
+         + "border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,0.12);padding:12px;"
+         + "font-size:12px;min-width:260px;max-width:320px",
+  });
+  panel.append(
+    el("div", { style: "font-weight:700;margin-bottom:6px" }, `Score: ${score} / 100`),
+    el("div", { style: "color:#374151" },
+      `Sample factor: ${sample.toFixed(3)} (n_eff = ${nEff.toFixed(1)}, saturates at n_eff=15)`),
+    el("div", { style: "color:#374151" },
+      `Consistency factor: ${consistency.toFixed(3)} (cv = ${cv.toFixed(3)})`),
+    el("div", { style: "color:#6B7280;margin-top:6px;font-size:11px" },
+      `Formula: round(100 × (0.6 × sample + 0.4 × consistency)) = ${score}`),
+  );
+  return panel;
+}
+
+function _enhanceProfileBadgesWithTooltip(body, profiles, settings) {
+  // Map badge -> profile by row index. Query confidence pills inside the profile table.
+  const rows = body.querySelectorAll("table.tbl tbody tr");
+  rows.forEach((tr, i) => {
+    const p = profiles[i];
+    if (!p) return;
+    const badge = tr.querySelector(".confidence-high, .confidence-mid, .confidence-low");
+    if (!badge || badge.dataset.tooltipEnhanced) return;
+    badge.dataset.tooltipEnhanced = "1";
+    badge.style.cursor = "pointer";
+    badge.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Remove any existing tooltip.
+      document.querySelectorAll(".confidence-tooltip").forEach(el2 => el2.remove());
+      const panel = _confidencePanel(p);
+      const rect = badge.getBoundingClientRect();
+      panel.style.left = `${rect.left + window.scrollX}px`;
+      panel.style.top = `${rect.bottom + window.scrollY + 4}px`;
+      document.body.append(panel);
+      // Click-outside to close.
+      const onDocClick = (ev) => {
+        if (ev.target === panel || panel.contains(ev.target)) return;
+        panel.remove();
+        document.removeEventListener("click", onDocClick);
+      };
+      setTimeout(() => document.addEventListener("click", onDocClick), 0);
+    });
+  });
+}
+
+/* ---------- Issue 7: effective_weight + age_days in observation drawer ---------- */
+
+function _enhanceObservationDrawerButtons(body, profiles) {
+  const rows = body.querySelectorAll("table.tbl tbody tr");
+  rows.forEach((tr, i) => {
+    const p = profiles[i];
+    if (!p) return;
+    const btn = tr.querySelector("button");
+    if (!btn || btn.dataset.prcDrawer) return;
+    btn.dataset.prcDrawer = "1";
+    // Replace the default drawer opener with one that shows weight + age.
+    const origOnclick = btn.onclick;
+    btn.onclick = async (_ev) => {
+      // Remove any stale drawer first.
+      document.querySelectorAll("[data-obs-drawer]").forEach(x => x.remove());
+      const rows2 = await apiFetch(
+        `/api/calibration/observations?client_id=${encodeURIComponent(p.client_id)}` +
+        `&target_id=${encodeURIComponent(p.target_id)}` +
+        `&channel_id=${encodeURIComponent(p.channel_id)}` +
+        `&metric=${encodeURIComponent(p.metric)}`
+      ).then(r => r.json());
+      const drawer = el("div", {
+        "data-obs-drawer": "1",
+        style: "position:fixed;right:0;top:0;bottom:0;width:min(560px,90vw);background:#fff;"
+             + "border-left:1px solid #E5E7EB;padding:16px;overflow:auto;z-index:1100",
+      });
+      drawer.append(
+        el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px" },
+          el("h4", { style: "margin:0" },
+            `Observations · ${p.channel_id} / ${p.metric}`),
+          el("button", {
+            style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+            onclick: () => drawer.remove(),
+          }, "✕")),
+        el("p", { style: "color:#6B7280;font-size:12px;margin:0 0 10px" },
+          "weight_override 設為 0 可排除、1 可強制計入。留空 = 依半衰期計算。"),
+      );
+      (rows2 || []).forEach(r => {
+        const weightInput = el("input", {
+          type: "number", step: "0.01", min: "0", max: "1",
+          value: r.weight_override == null ? "" : String(r.weight_override),
+          style: "width:70px;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px",
+        });
+        const savebtn = el("button", {
+          style: "margin-left:6px;padding:3px 10px;border:0;background:#10B981;color:#fff;"
+               + "border-radius:999px;cursor:pointer;font-size:12px",
+          onclick: async () => {
+            const val = weightInput.value === "" ? null : Number(weightInput.value);
+            await apiFetch(`/api/calibration/observations/${r.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ weight_override: val }),
+            });
+            botSay(`Observation ${r.id} weight_override = ${val == null ? "(clear)" : val}.`);
+            drawer.remove();
+          },
+        }, "存");
+        const pinned = r.weight_override != null ? " (pinned)" : "";
+        const eff = r.effective_weight != null ? Number(r.effective_weight).toFixed(2) : "—";
+        const age = r.age_days != null ? Number(r.age_days).toFixed(0) : "?";
+        drawer.append(
+          el("div", {
+            style: "border-top:1px solid #F3F4F6;padding:8px 0;"
+                 + "display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center",
+          },
+            el("div", {},
+              el("div", { style: "font-size:12px;color:#111827" },
+                `value = ${Number(r.value).toFixed(2)}`),
+              el("div", { style: "font-size:11px;color:#6B7280" },
+                `observed_at = ${new Date(r.observed_at * 1000).toISOString().slice(0, 10)}`),
+              el("div", { style: "font-size:11px;color:#6B7280" },
+                `Weight: ${eff} (age ${age} days)${pinned}`),
+            ),
+            el("div", { style: "display:flex;align-items:center" },
+              weightInput, savebtn),
+          )
+        );
+      });
+      document.body.append(drawer);
+    };
+  });
+}
+
+/* ---------- Issue 9: Actuals history viewer ---------- */
+
+async function openActualsHistory(plan) {
+  const rows = await apiFetch(`/api/plans/${plan.id}/actuals/history`).then(r => r.json()).catch(() => []);
+  const overlay = el("div", {
+    style: "position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1200;display:flex;"
+         + "align-items:center;justify-content:center",
+  });
+  const panel = el("div", {
+    style: "background:#fff;border-radius:12px;padding:18px;width:min(960px,92vw);"
+         + "max-height:86vh;overflow:auto",
+  });
+  panel.append(
+    el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px" },
+      el("h3", { style: "margin:0" }, `📜 歷史記錄 · ${plan.name}`),
+      el("button", {
+        style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+        onclick: () => overlay.remove(),
+      }, "✕")));
+  if (!rows.length) {
+    panel.append(el("div", { style: "color:#6B7280;padding:10px" }, "尚無覆寫紀錄。"));
+  } else {
+    const tbl = el("table", { class: "tbl" });
+    tbl.append(el("thead", {}, el("tr", {},
+      el("th", {}, "Scope"),
+      el("th", { class: "num" }, "Week"),
+      el("th", {}, "Recorded at"),
+      el("th", {}, "Superseded at"),
+      el("th", {}, "First channel spend"),
+    )));
+    const tb = el("tbody", {});
+    rows.forEach(r => {
+      const firstCh = Object.keys(r.per_channel || {})[0];
+      const spend = firstCh ? Math.round(Number(r.per_channel[firstCh]?.spend_twd || 0)).toLocaleString() : "—";
+      const recAt = new Date(Number(r.recorded_at) * 1000).toISOString().slice(0, 16).replace("T", " ");
+      const supAt = r.superseded_at
+        ? new Date(Number(r.superseded_at) * 1000).toISOString().slice(0, 16).replace("T", " ")
+        : "—";
+      tb.append(el("tr", {},
+        el("td", {}, r.scope),
+        el("td", { class: "num" }, r.period_week == null ? "—" : String(r.period_week)),
+        el("td", {}, recAt),
+        el("td", {}, supAt),
+        el("td", {}, firstCh ? `${firstCh}: ${spend}` : "—"),
+      ));
+    });
+    tbl.append(tb);
+    panel.append(tbl);
+  }
+  overlay.append(panel);
+  document.body.append(overlay);
+}
+
+/* ---------- Issue 9 + 10: extend openActualsModal with history button + per-week delete ---------- */
+
+const _origOpenActualsModal = openActualsModal;
+openActualsModal = async function(plan) {
+  await _origOpenActualsModal(plan);
+  // Find the last-opened overlay for this plan.
+  const overlays = document.querySelectorAll("body > div");
+  const overlay = overlays[overlays.length - 1];
+  if (!overlay) return;
+  const modal = overlay.querySelector("div");
+  if (!modal) return;
+
+  // Inject a "📜 歷史記錄" button next to 儲存.
+  const saveBtn = [...modal.querySelectorAll("button")]
+    .find(b => b.textContent === "儲存");
+  if (saveBtn && !saveBtn.dataset.prcHistoryInjected) {
+    saveBtn.dataset.prcHistoryInjected = "1";
+    const histBtn = el("button", {
+      style: "margin-left:8px;padding:8px 14px;border:1px solid #111827;"
+           + "background:#fff;color:#111827;border-radius:999px;cursor:pointer",
+      onclick: () => openActualsHistory(plan),
+    }, "📜 歷史記錄");
+    saveBtn.parentNode?.append(histBtn);
+  }
+
+  // Issue 10: per-week delete button on saved weeks only.
+  let existing;
+  try {
+    existing = await apiFetch(`/api/plans/${plan.id}/actuals`).then(r => r.json());
+  } catch (_) { existing = []; }
+  const savedByWeek = {};
+  (existing || []).forEach(rec => {
+    if (rec.scope === "WEEKLY" && rec.period_week != null) {
+      savedByWeek[rec.period_week] = rec;
+    }
+  });
+
+  const weekBlocks = modal.querySelectorAll("details");
+  weekBlocks.forEach((det, idx) => {
+    const week = idx + 1;
+    const rec = savedByWeek[week];
+    if (!rec) return;
+    const summary = det.querySelector("summary");
+    if (!summary || summary.dataset.prcDelInjected) return;
+    summary.dataset.prcDelInjected = "1";
+    const delBtn = el("button", {
+      style: "margin-left:10px;padding:2px 8px;border:1px solid #EF4444;color:#EF4444;"
+           + "background:#fff;border-radius:999px;cursor:pointer;font-size:11px",
+      onclick: async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (!confirm(`確認刪除 Week ${week} 的 actuals?`)) return;
+        try {
+          await apiFetch(`/api/plans/${plan.id}/actuals/${rec.id}`, { method: "DELETE" });
+          botSay(`🗑 已刪除 Week ${week} actuals.`);
+          overlay.remove();
+          openActualsModal(plan);
+        } catch (e) { showError(e); }
+      },
+    }, "🗑 刪除本週");
+    summary.append(delBtn);
+  });
+};
+
+/* ---------- Issue 15: data-plan-id attributes on plan rows ---------- */
+
+/* Replace the index-based plan lookup in the existing renderProjectDetail
+ * wrapper with a data-plan-id attribute. We inject the attribute AFTER
+ * the base wrapper finished so we stay compatible with existing code. */
+const _origRenderProjectDetailPRC = renderProjectDetail;
+renderProjectDetail = async function(projectId) {
+  await _origRenderProjectDetailPRC(projectId);
+  try {
+    const plans = await api.projectPlans(projectId);
+    // Find every plan row produced by the base renderer + tag it.
+    const planRows = scroll.querySelectorAll("table.tbl tbody tr");
+    planRows.forEach((tr, idx) => {
+      const firstHeader = tr.parentElement?.previousElementSibling?.querySelector("th")?.textContent || "";
+      if (firstHeader !== "Plan") return;
+      const plan = plans[idx] || plans[idx - (planRows.length - plans.length)];
+      if (!plan) return;
+      tr.setAttribute("data-plan-id", plan.id);
+    });
+  } catch (_) { /* best-effort */ }
+};
+
 bootApp();

@@ -30,10 +30,10 @@ import math
 import sqlite3
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from ..schemas import CalibrationObservation, CalibrationProfile
+from ..schemas import ActualsScope, CalibrationObservation, CalibrationProfile
 from . import storage
 
 
@@ -309,6 +309,22 @@ def confidence_bucket(score: int, *, owner_id: Optional[str] = None) -> str:
 
 # ---------- Profile materialisation ----------
 
+def _profile_from_row(row) -> CalibrationProfile:
+    keys = row.keys() if hasattr(row, "keys") else []
+    return CalibrationProfile(
+        client_id=row["client_id"], target_id=row["target_id"],
+        channel_id=row["channel_id"], metric=row["metric"],
+        value_mean_weighted=row["value_mean_weighted"],
+        value_stdev=row["value_stdev"],
+        n_raw=row["n_raw"], n_effective=row["n_effective"],
+        confidence_score=row["confidence_score"],
+        last_updated=row["last_updated"],
+        sample_factor=row["sample_factor"] if "sample_factor" in keys else 0.0,
+        consistency_factor=row["consistency_factor"] if "consistency_factor" in keys else 0.0,
+        cv=row["cv"] if "cv" in keys else 0.0,
+    )
+
+
 def get_profile(*, client_id: str, target_id: str, channel_id: str,
                 metric: str, owner_id: str) -> Optional[CalibrationProfile]:
     row = storage._conn().execute(
@@ -318,15 +334,7 @@ def get_profile(*, client_id: str, target_id: str, channel_id: str,
     ).fetchone()
     if not row:
         return None
-    return CalibrationProfile(
-        client_id=row["client_id"], target_id=row["target_id"],
-        channel_id=row["channel_id"], metric=row["metric"],
-        value_mean_weighted=row["value_mean_weighted"],
-        value_stdev=row["value_stdev"],
-        n_raw=row["n_raw"], n_effective=row["n_effective"],
-        confidence_score=row["confidence_score"],
-        last_updated=row["last_updated"],
-    )
+    return _profile_from_row(row)
 
 
 def list_profiles(owner_id: str) -> List[CalibrationProfile]:
@@ -334,15 +342,7 @@ def list_profiles(owner_id: str) -> List[CalibrationProfile]:
         "SELECT * FROM calibration_profiles WHERE owner_id=?",
         (owner_id,),
     ).fetchall()
-    return [CalibrationProfile(
-        client_id=r["client_id"], target_id=r["target_id"],
-        channel_id=r["channel_id"], metric=r["metric"],
-        value_mean_weighted=r["value_mean_weighted"],
-        value_stdev=r["value_stdev"],
-        n_raw=r["n_raw"], n_effective=r["n_effective"],
-        confidence_score=r["confidence_score"],
-        last_updated=r["last_updated"],
-    ) for r in rows]
+    return [_profile_from_row(r) for r in rows]
 
 
 def _rematerialise_profile(owner_id: str, client_id: str, target_id: str,
@@ -389,20 +389,29 @@ def _rematerialise_profile(owner_id: str, client_id: str, target_id: str,
         stdev = 0.0
     cv = (stdev / mean) if mean else 0.0
     confidence = compute_confidence(total_w, cv)
+    # v6 · FR-30b — persist the formula breakdown so the frontend tooltip
+    # doesn't have to redo the maths.
+    sample_factor = 1.0 - math.exp(-total_w / 5.0) if total_w > 0 else 0.0
+    consistency_factor = max(0.0, 1.0 - min(max(cv, 0.0), 1.0))
 
     storage._conn().execute(
         "INSERT INTO calibration_profiles(owner_id, client_id, target_id, "
         "channel_id, metric, value_mean_weighted, value_stdev, n_raw, "
-        "n_effective, confidence_score, last_updated) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "n_effective, confidence_score, last_updated, "
+        "sample_factor, consistency_factor, cv) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(owner_id, client_id, target_id, channel_id, metric) "
         "DO UPDATE SET value_mean_weighted=excluded.value_mean_weighted, "
         "value_stdev=excluded.value_stdev, n_raw=excluded.n_raw, "
         "n_effective=excluded.n_effective, "
         "confidence_score=excluded.confidence_score, "
-        "last_updated=excluded.last_updated",
+        "last_updated=excluded.last_updated, "
+        "sample_factor=excluded.sample_factor, "
+        "consistency_factor=excluded.consistency_factor, "
+        "cv=excluded.cv",
         (owner_id, client_id, target_id, channel_id, metric, mean, stdev,
-         len(obs), total_w, confidence, now),
+         len(obs), total_w, confidence, now,
+         sample_factor, consistency_factor, cv),
     )
 
 
@@ -419,6 +428,39 @@ def _rematerialise_all_for_owner(owner_id: str) -> None:
 
 # ---------- Actuals → observations helper ----------
 
+def _observed_at_for_record(plan_brief, actuals_record) -> datetime:
+    """Pick the semantically-correct ``observed_at`` for calibration decay.
+
+    * ``FINAL`` — the event represents end-of-campaign performance, so use
+      ``brief.end_date`` (23:59:59 UTC of that date is overkill; midnight
+      is fine — decay is measured in days).
+    * ``WEEKLY`` — the event represents week ``period_week`` of the plan;
+      use the END of that week (``start_date + 7 * (k-1) + 6 days``).
+    * Anything else (or missing dates) falls back to ``recorded_at`` to
+      preserve pre-v6 behaviour.
+    """
+    scope = actuals_record.scope
+    scope_value = scope.value if isinstance(scope, ActualsScope) else str(scope)
+
+    def _date_to_dt(d) -> Optional[datetime]:
+        if d is None:
+            return None
+        return datetime.combine(d, dtime.min, tzinfo=timezone.utc)
+
+    if scope_value == "FINAL":
+        dt = _date_to_dt(getattr(plan_brief, "end_date", None))
+        if dt is not None:
+            return dt
+    elif scope_value == "WEEKLY":
+        start = getattr(plan_brief, "start_date", None)
+        wk = actuals_record.period_week
+        if start is not None and wk is not None and wk >= 1:
+            week_end = start + timedelta(days=7 * (wk - 1) + 6)
+            return datetime.combine(week_end, dtime.min, tzinfo=timezone.utc)
+
+    return datetime.fromtimestamp(actuals_record.recorded_at, tz=timezone.utc)
+
+
 def record_from_actuals(*, plan_brief, actuals_record, owner_id: str) -> None:
     """Convert one :class:`PlanActualsRecord` into one observation per
     channel × tracked metric. Called by the PUT /actuals route AFTER the
@@ -428,6 +470,11 @@ def record_from_actuals(*, plan_brief, actuals_record, owner_id: str) -> None:
     the FIRST target_id as the key — multi-target audiences are modelled
     as separate campaigns in the CCS pipeline, so fan-out would mix
     clearly-different populations.
+
+    v6 · Issue 12 — ``observed_at`` maps to the event window the data
+    actually represents (plan end-date for FINAL, week-end for WEEKLY),
+    NOT when the planner typed it in. This is the clock decay maths
+    runs against.
     """
     client_id = plan_brief.client_id
     target_ids = plan_brief.target_ids or []
@@ -435,11 +482,7 @@ def record_from_actuals(*, plan_brief, actuals_record, owner_id: str) -> None:
         return
     target_id = target_ids[0]
 
-    # Use the record's scope timestamp — FINAL rows stamp with recorded_at,
-    # WEEKLY rows stamp with recorded_at too (good enough; planners can
-    # pin weight_override for outliers).
-    observed_at = datetime.fromtimestamp(actuals_record.recorded_at,
-                                         tz=timezone.utc)
+    observed_at = _observed_at_for_record(plan_brief, actuals_record)
     for ch, ca in actuals_record.per_channel.items():
         for metric in _TRACKED_METRICS:
             value = getattr(ca, metric, None)
@@ -454,3 +497,21 @@ def record_from_actuals(*, plan_brief, actuals_record, owner_id: str) -> None:
                 source_plan_id=actuals_record.plan_id,
                 source_actuals_id=actuals_record.id,
             )
+
+
+# ---------- Effective weight (issue 7 · v6 · FR-30) ----------
+
+def compute_effective_weight(obs: CalibrationObservation, half_life_days: float,
+                              *, at: Optional[datetime] = None) -> float:
+    """The weight this observation currently contributes to its profile mean.
+
+    If ``weight_override`` is set it overrides decay; otherwise compute from
+    age. Returns the same value the profile materialiser would apply to this
+    observation — letting the frontend render "what's this row worth right
+    now?" without mirroring the maths.
+    """
+    if obs.weight_override is not None:
+        return max(0.0, min(1.0, float(obs.weight_override)))
+    now = at or datetime.now(tz=timezone.utc)
+    age_days = max(0.0, (now.timestamp() - float(obs.observed_at)) / 86400.0)
+    return decay_weight(age_days, half_life_days)
