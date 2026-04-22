@@ -1973,6 +1973,264 @@ renderProjectDetail = async function(projectId) {
   });
 };
 
+/* ========================================================================
+ * v6 · PR B — Calibration Settings panel + confidence badges
+ * ====================================================================== */
+
+/* Text copy used by the UI. Keeps the Chinese labels in one place so
+ * they're easy to review / re-word. */
+const CONFIDENCE_COPY = {
+  high: "高信心 · 已累積資料",
+  mid:  "中等信心 · 建議再跑一檔",
+  low:  "資料不足 · 建議先用 system default",
+};
+
+function _confidenceBadge(score, bucket) {
+  const colour = bucket === "high" ? "#10B981"
+               : bucket === "mid"  ? "#F59E0B"
+               : "#EF4444";
+  const cls = `confidence-${bucket}`;
+  const tip = `Score ${score} / 100 (依樣本數 + 一致性計算)`;
+  return el("span", {
+    class: cls, title: tip,
+    style: `display:inline-block;padding:2px 8px;border-radius:999px;` +
+           `background:${colour};color:#fff;font-size:11px;font-weight:600`,
+  }, `${score} · ${CONFIDENCE_COPY[bucket] || bucket}`);
+}
+
+async function openCalibrationSettings() {
+  const overlay = el("div", {
+    style: "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;" +
+           "display:flex;align-items:center;justify-content:center",
+  });
+  const modal = el("div", {
+    style: "background:#fff;border-radius:12px;padding:20px;width:min(880px,92vw);" +
+           "max-height:88vh;overflow:auto",
+  });
+  modal.append(
+    el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px" },
+      el("h3", { style: "margin:0" }, "⚙️ 校正設定"),
+      el("button", {
+        style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+        onclick: () => overlay.remove(),
+      }, "✕")),
+    el("p", { style: "margin:0 0 10px;color:#6B7280;font-size:13px" },
+       "調整 CalibrationProfile 的半衰期與信心門檻。")
+  );
+  const body = el("div", {});
+  modal.append(body);
+
+  async function refresh() {
+    body.innerHTML = "";
+    try {
+      const settings = await apiFetch("/api/calibration/settings").then(r => r.json());
+      const profiles = await apiFetch("/api/calibration/profiles").then(r => r.json());
+
+      // Global half-life slider
+      const hlCurrent = settings?.global?.half_life_days ?? 180;
+      const hlLabel = el("div", {},
+        el("span", { style: "font-weight:600" }, "近期權重（半衰期）"),
+        el("span", { style: "color:#6B7280;margin-left:8px;font-size:12px" },
+          `目前 ${hlCurrent} 天 — 數字越小，越早的資料影響越少。`));
+      const hlSlider = el("input", {
+        type: "range", min: "30", max: "365", step: "30",
+        value: String(hlCurrent),
+        style: "width:100%",
+      });
+      const hlNumber = el("input", {
+        type: "number", value: String(hlCurrent), step: "1", min: "1",
+        style: "width:90px;margin-left:8px",
+      });
+      hlSlider.oninput = () => { hlNumber.value = hlSlider.value; };
+      hlNumber.oninput = () => { hlSlider.value = hlNumber.value; };
+      const hlApply = el("button", {
+        style: "padding:6px 14px;border:0;background:#8B5CF6;color:#fff;border-radius:999px;cursor:pointer;margin-left:8px",
+        onclick: async () => {
+          const days = Number(hlNumber.value);
+          if (!(days > 0)) return;
+          await apiFetch("/api/calibration/settings", {
+            method: "PUT",
+            body: JSON.stringify({ scope: "global", half_life_days: days }),
+          });
+          botSay(`已將 half_life_days 設為 ${days} 天。`);
+          refresh();
+        },
+      }, "套用");
+      const hlReset = el("button", {
+        style: "padding:6px 14px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;margin-left:6px",
+        onclick: async () => {
+          await apiFetch("/api/calibration/settings?scope=global", { method: "DELETE" });
+          botSay("已還原 global half_life_days = 180 天。");
+          refresh();
+        },
+      }, "還原預設");
+      body.append(
+        el("div", { style: "margin-bottom:18px;padding:12px;border:1px solid #E5E7EB;border-radius:8px" },
+          hlLabel,
+          el("div", { style: "display:flex;align-items:center;gap:4px;margin-top:6px" },
+            hlSlider, hlNumber, hlApply, hlReset),
+        ),
+      );
+
+      // Profiles table
+      body.append(el("h5", { style: "margin:8px 0" }, `Calibration Profiles (${profiles.length})`));
+      if (profiles.length === 0) {
+        body.append(el("div", { style: "color:#6B7280" },
+          "尚未累積任何資料。完成 plan 後記錄 actuals，系統會自動建立 profile。"));
+      } else {
+        const tbl = el("table", { class: "tbl" });
+        tbl.append(el("thead", {}, el("tr", {},
+          el("th", {}, "Client"), el("th", {}, "Target"),
+          el("th", {}, "Channel"), el("th", {}, "Metric"),
+          el("th", { class: "num" }, "Mean"),
+          el("th", { class: "num" }, "n_raw"),
+          el("th", { class: "num" }, "n_eff"),
+          el("th", {}, "Confidence"),
+          el("th", {}, ""),
+        )));
+        const tbody = el("tbody", {});
+        profiles.forEach(p => {
+          const bucket = p.confidence_score >= (settings?.global?.thresholds?.high ?? 70) ? "high"
+                       : p.confidence_score >= (settings?.global?.thresholds?.mid  ?? 40) ? "mid"
+                       : "low";
+          const cls = `confidence-${bucket}`;
+          tbody.append(el("tr", { class: cls },
+            el("td", {}, p.client_id),
+            el("td", {}, p.target_id),
+            el("td", {}, p.channel_id),
+            el("td", {}, p.metric),
+            el("td", { class: "num" }, (p.value_mean_weighted || 0).toFixed(2)),
+            el("td", { class: "num" }, String(p.n_raw)),
+            el("td", { class: "num" }, (p.n_effective || 0).toFixed(2)),
+            el("td", {}, _confidenceBadge(p.confidence_score, bucket)),
+            el("td", {},
+              el("button", {
+                style: "padding:3px 8px;border:1px solid #111827;background:#fff;border-radius:999px;cursor:pointer;font-size:11px",
+                onclick: () => openObservationDrawer(p),
+              }, "觀察值")),
+          ));
+        });
+        tbl.append(tbody);
+        body.append(tbl);
+      }
+    } catch (e) { showError(e); }
+  }
+
+  async function openObservationDrawer(profile) {
+    const rows = await apiFetch(
+      `/api/calibration/observations?client_id=${encodeURIComponent(profile.client_id)}` +
+      `&target_id=${encodeURIComponent(profile.target_id)}` +
+      `&channel_id=${encodeURIComponent(profile.channel_id)}` +
+      `&metric=${encodeURIComponent(profile.metric)}`
+    ).then(r => r.json());
+    const drawer = el("div", {
+      style: "position:fixed;right:0;top:0;bottom:0;width:min(520px,88vw);background:#fff;" +
+             "border-left:1px solid #E5E7EB;padding:16px;overflow:auto;z-index:1100",
+    });
+    drawer.append(
+      el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px" },
+        el("h4", { style: "margin:0" },
+          `Observations · ${profile.channel_id} / ${profile.metric}`),
+        el("button", {
+          style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+          onclick: () => drawer.remove(),
+        }, "✕")),
+      el("p", { style: "color:#6B7280;font-size:12px;margin:0 0 10px" },
+        "把 weight_override 設為 0 可排除異常值、1 可強制全權計入。留空則依半衰期計算。"),
+    );
+    rows.forEach(r => {
+      const weightInput = el("input", {
+        type: "number", step: "0.01", min: "0", max: "1",
+        value: r.weight_override == null ? "" : String(r.weight_override),
+        style: "width:70px;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px",
+      });
+      const savebtn = el("button", {
+        style: "margin-left:6px;padding:3px 10px;border:0;background:#10B981;color:#fff;border-radius:999px;cursor:pointer;font-size:12px",
+        onclick: async () => {
+          const val = weightInput.value === "" ? null : Number(weightInput.value);
+          await apiFetch(`/api/calibration/observations/${r.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ weight_override: val }),
+          });
+          botSay(`Observation ${r.id} weight_override = ${val == null ? "(clear)" : val}.`);
+          drawer.remove();
+          refresh();
+        },
+      }, "存");
+      drawer.append(
+        el("div", { style: "border-top:1px solid #F3F4F6;padding:8px 0;display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center" },
+          el("div", {},
+            el("div", { style: "font-size:12px;color:#111827" },
+              `value = ${r.value.toFixed(2)}`),
+            el("div", { style: "font-size:11px;color:#6B7280" },
+              `observed_at = ${new Date(r.observed_at * 1000).toISOString().slice(0, 10)}`),
+          ),
+          el("div", { style: "display:flex;align-items:center" },
+            weightInput, savebtn),
+        )
+      );
+    });
+    document.body.append(drawer);
+  }
+
+  await refresh();
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
+/* Expose a Home-screen button to open the Calibration Settings panel.
+ * Drops a button into the topbar via delegation on first render. */
+function _installCalibrationTopbarButton() {
+  if (document.getElementById("btnCalibration")) return;
+  const topbar = document.querySelector(".topbar");
+  if (!topbar) return;
+  const btn = el("button", {
+    id: "btnCalibration", class: "reset",
+    title: "Calibration Settings",
+    onclick: () => openCalibrationSettings(),
+  }, "⚙️");
+  topbar.insertBefore(btn, document.getElementById("btnLogout"));
+}
+_installCalibrationTopbarButton();
+
+/* Enrich the Reports view with confidence badges drawn from the profile
+ * for this plan's (client × target × channel). Wraps the PR A function
+ * that already walks per-channel rows. */
+const _origRenderPlanReport = renderPlanReport;
+renderPlanReport = async function(plan) {
+  await _origRenderPlanReport(plan);
+  // After the base renderer, look up profiles + patch in confidence badges.
+  try {
+    const sess = await apiFetch(`/api/sessions/${encodeURIComponent(plan.brief_id)}`)
+      .then(r => r.json())
+      .catch(() => null);
+    if (!sess) return;
+    const clientId = sess.session?.brief?.client_id;
+    const targetId = (sess.session?.brief?.target_ids || [])[0];
+    if (!clientId || !targetId) return;
+    const settings = await apiFetch("/api/calibration/settings").then(r => r.json());
+    const hi = settings?.global?.thresholds?.high ?? 70;
+    const mid = settings?.global?.thresholds?.mid ?? 40;
+    const profiles = await apiFetch("/api/calibration/profiles").then(r => r.json());
+    const byCh = {};
+    profiles.forEach(p => {
+      if (p.client_id === clientId && p.target_id === targetId
+          && p.metric === "cpm_twd") {
+        byCh[p.channel_id] = p;
+      }
+    });
+    scroll.querySelectorAll("table.tbl tbody tr").forEach(tr => {
+      const ch = tr.children[0]?.textContent;
+      const p = byCh[ch];
+      if (!p) return;
+      const bucket = p.confidence_score >= hi ? "high"
+                   : p.confidence_score >= mid ? "mid" : "low";
+      const badgeTd = el("td", {}, _confidenceBadge(p.confidence_score, bucket));
+      tr.append(badgeTd);
+    });
+  } catch (_) { /* best-effort */ }
+};
+
 /* Install #navHome click (delegated) */
 document.addEventListener("click", (e) => {
   const t = e.target;
