@@ -69,6 +69,15 @@ class StepError(ValueError):
     """Raised for user-facing validation failures."""
 
 
+def _is_overrides_only_payload(payload: StepPayload) -> bool:
+    """True when the payload only carries ``overrides`` (+ no step-advancing
+    data and no action). Used by :func:`advance` to treat override edits
+    as a sticky side-channel that doesn't progress the wizard."""
+    dumped = payload.model_dump(mode="json", exclude_none=True)
+    dumped.pop("overrides", None)
+    return not dumped
+
+
 # Input caps — mirrored in docs/PRD.md §NFR-1.3. Enforced in-agent (not in
 # Pydantic) so the error messages stay human-readable and localised.
 MAX_PROJECT_NAME_LEN = 120
@@ -301,17 +310,54 @@ def fork(source: AgentSession, target_mode: SessionMode, *,
     return storage.save_session(new, owner_id=owner_id, project_id=project_id)
 
 
+def _apply_overrides(session: AgentSession, payload: StepPayload) -> bool:
+    """v6 · FR-31 — orthogonal side-channel so the planner can update
+    per-channel overrides at any step without having to re-enter the
+    CHANNELS step. Returns True when the payload carried overrides
+    (so the caller can decide whether to step forward).
+
+    Semantics:
+      * ``overrides is None``  → leave the brief alone.
+      * ``overrides == {}``    → CLEAR every existing override.
+      * non-empty dict         → replace by channel_id; existing keys
+                                 not in the new dict are preserved.
+    """
+    if payload.overrides is None:
+        return False
+    if payload.overrides == {}:
+        session.brief.overrides = {}
+        return True
+    merged = dict(session.brief.overrides)
+    for ch, ov in payload.overrides.items():
+        if ov is None:
+            merged.pop(ch, None)
+        else:
+            merged[ch] = ov
+    session.brief.overrides = merged
+    return True
+
+
 def advance(session: AgentSession, payload: StepPayload, *,
             owner_id: str, prompt: str = "",
             log_turn: bool = True) -> AgentSession:
     order = step_order(session.mode)
     prev_step = session.step
+
+    # v6 · FR-31 — overrides-only payload? Record + save without advancing
+    # the step. Lets the planner tweak CPM/penetration mid-flow without
+    # rewinding.
+    overrides_set = _apply_overrides(session, payload)
+    overrides_only = overrides_set and _is_overrides_only_payload(payload)
+
     if payload.action == "back":
         idx = max(0, step_index(session) - 1)
         session.step = order[idx]
     elif payload.action == "skip":
         idx = min(len(order) - 1, step_index(session) + 1)
         session.step = order[idx]
+    elif overrides_only:
+        # Stay on the current step — nothing else to do.
+        pass
     else:
         handler = _STEP_HANDLERS.get(session.step)
         if not handler:

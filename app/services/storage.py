@@ -30,9 +30,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..config import DATABASE_PATH, STORAGE_PATH
 from ..schemas import (
+    ActualsScope,
     AgentSession,
     ConversationTurn,
     Plan,
+    PlanActualsRecord,
     Project,
     User,
 )
@@ -147,6 +149,41 @@ CREATE TABLE IF NOT EXISTS conversations (
     UNIQUE(session_id, turn_index)
 );
 CREATE INDEX IF NOT EXISTS idx_convo_session ON conversations(session_id);
+
+-- v6 · FR-27 — actuals capture (weekly + final).
+CREATE TABLE IF NOT EXISTS plan_actuals (
+    id           TEXT PRIMARY KEY,
+    plan_id      TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    owner_id     TEXT NOT NULL REFERENCES users(id),
+    recorded_by  TEXT,
+    recorded_at  REAL NOT NULL,
+    scope        TEXT NOT NULL,      -- 'WEEKLY' | 'FINAL'
+    period_week  INTEGER,             -- required iff scope='WEEKLY'
+    payload      TEXT NOT NULL,       -- full PlanActualsRecord JSON
+    notes        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_plan_actuals_plan ON plan_actuals(plan_id);
+-- Uniqueness: one FINAL per plan, one per (plan, week). SQLite partial
+-- indexes let us express both without a CHECK-constraint gymnastic.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_actuals_final
+    ON plan_actuals(plan_id) WHERE scope = 'FINAL';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_plan_actuals_weekly
+    ON plan_actuals(plan_id, period_week) WHERE scope = 'WEEKLY';
+
+CREATE TABLE IF NOT EXISTS plan_actuals_history (
+    id           TEXT PRIMARY KEY,          -- same as the superseded row's id
+    plan_id      TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,
+    recorded_by  TEXT,
+    recorded_at  REAL NOT NULL,
+    scope        TEXT NOT NULL,
+    period_week  INTEGER,
+    payload      TEXT NOT NULL,
+    notes        TEXT,
+    superseded_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_actuals_history_plan
+    ON plan_actuals_history(plan_id);
 """
 
 _SCHEMA_VERSION = 1
@@ -191,7 +228,8 @@ def list_tables() -> List[str]:
 
 def _count(table: str) -> int:
     # table name is NOT user-controlled — restrict to a fixed whitelist.
-    assert table in {"users", "projects", "sessions", "plans", "conversations"}
+    assert table in {"users", "projects", "sessions", "plans",
+                     "conversations", "plan_actuals", "plan_actuals_history"}
     c = _conn()
     return c.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
 
@@ -578,10 +616,167 @@ def reset() -> None:
     """Testing only — drop & recreate. Caller must reinit."""
     with _lock:
         c = _conn()
-        for t in ["conversations", "plans", "sessions", "projects", "users",
+        for t in ["plan_actuals_history", "plan_actuals",
+                  "conversations", "plans", "sessions", "projects", "users",
                   "schema_version"]:
             c.execute(f"DROP TABLE IF EXISTS {t}")
     init_schema()
+
+
+# ---------- Plan Actuals (v6 · FR-27) ----------
+
+def _actuals_row_to_record(row: sqlite3.Row) -> PlanActualsRecord:
+    raw = json.loads(row["payload"])
+    # The payload already carries most fields; override with DB-canonical
+    # columns so re-encoded records don't drift from the index.
+    raw.update({
+        "id": row["id"],
+        "plan_id": row["plan_id"],
+        "recorded_by": row["recorded_by"],
+        "recorded_at": row["recorded_at"],
+        "scope": row["scope"],
+        "period_week": row["period_week"],
+    })
+    return PlanActualsRecord(**raw)
+
+
+def list_actuals(plan_id: str, *, owner_id: str) -> List[PlanActualsRecord]:
+    rows = _conn().execute(
+        "SELECT * FROM plan_actuals WHERE plan_id = ? AND owner_id = ? "
+        "ORDER BY CASE scope WHEN 'WEEKLY' THEN 0 ELSE 1 END, "
+        "period_week ASC, recorded_at ASC",
+        (plan_id, owner_id),
+    ).fetchall()
+    return [_actuals_row_to_record(r) for r in rows]
+
+
+def list_actuals_history(plan_id: str, *, owner_id: str) -> List[Dict]:
+    rows = _conn().execute(
+        "SELECT * FROM plan_actuals_history WHERE plan_id = ? AND owner_id = ? "
+        "ORDER BY superseded_at DESC",
+        (plan_id, owner_id),
+    ).fetchall()
+    out: List[Dict] = []
+    for r in rows:
+        raw = json.loads(r["payload"])
+        raw.update({
+            "id": r["id"], "plan_id": r["plan_id"],
+            "recorded_by": r["recorded_by"],
+            "recorded_at": r["recorded_at"],
+            "scope": r["scope"], "period_week": r["period_week"],
+            "superseded_at": r["superseded_at"],
+        })
+        out.append(raw)
+    return out
+
+
+def _archive_actuals_row(c: sqlite3.Connection, row: sqlite3.Row) -> None:
+    c.execute(
+        "INSERT INTO plan_actuals_history(id, plan_id, owner_id, recorded_by, "
+        "recorded_at, scope, period_week, payload, notes, superseded_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (row["id"], row["plan_id"], row["owner_id"], row["recorded_by"],
+         row["recorded_at"], row["scope"], row["period_week"],
+         row["payload"], row["notes"], _now()),
+    )
+
+
+def upsert_actuals_records(plan_id: str, records: List[PlanActualsRecord],
+                           *, owner_id: str,
+                           recorded_by: Optional[str] = None) -> List[PlanActualsRecord]:
+    """Replace weekly/final rows, archiving superseded copies.
+
+    Atomic: wraps the whole batch in an explicit transaction so a bad
+    record mid-batch doesn't leave the DB half-updated. ``isolation_level``
+    on the connection is ``None`` (autocommit) so we need BEGIN/COMMIT
+    explicitly.
+    """
+    out: List[PlanActualsRecord] = []
+    with _lock:
+        c = _conn()
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            for rec in records:
+                scope = rec.scope.value if isinstance(rec.scope, ActualsScope) else str(rec.scope)
+                period_week = rec.period_week if scope == "WEEKLY" else None
+
+                # Find any existing row we'd supersede.
+                if scope == "FINAL":
+                    existing = c.execute(
+                        "SELECT * FROM plan_actuals WHERE plan_id = ? AND scope = 'FINAL'",
+                        (plan_id,),
+                    ).fetchone()
+                else:
+                    existing = c.execute(
+                        "SELECT * FROM plan_actuals "
+                        "WHERE plan_id = ? AND scope = 'WEEKLY' AND period_week = ?",
+                        (plan_id, period_week),
+                    ).fetchone()
+                if existing:
+                    _archive_actuals_row(c, existing)
+                    c.execute("DELETE FROM plan_actuals WHERE id = ?", (existing["id"],))
+
+                rid = rec.id or _new_id("act")
+                now = _now()
+                rec_to_store = PlanActualsRecord(
+                    id=rid, plan_id=plan_id,
+                    recorded_by=recorded_by, recorded_at=now,
+                    scope=scope, period_week=period_week,
+                    per_channel=rec.per_channel, notes=rec.notes,
+                )
+                c.execute(
+                    "INSERT INTO plan_actuals(id, plan_id, owner_id, recorded_by, "
+                    "recorded_at, scope, period_week, payload, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (rid, plan_id, owner_id, recorded_by, now, scope, period_week,
+                     json.dumps(rec_to_store.model_dump(mode="json"), ensure_ascii=False),
+                     rec.notes),
+                )
+                out.append(rec_to_store)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return out
+
+
+def delete_actuals_record(plan_id: str, record_id: str,
+                          *, owner_id: str) -> bool:
+    """Soft-delete: archive to history, then remove from current table."""
+    with _lock:
+        c = _conn()
+        row = c.execute(
+            "SELECT * FROM plan_actuals WHERE id = ? AND plan_id = ? AND owner_id = ?",
+            (record_id, plan_id, owner_id),
+        ).fetchone()
+        if not row:
+            return False
+        _archive_actuals_row(c, row)
+        c.execute("DELETE FROM plan_actuals WHERE id = ?", (record_id,))
+        return True
+
+
+def count_actuals_for_client_target(client_id: str, target_id: str,
+                                    *, owner_id: str) -> int:
+    """Used by the banner-coverage endpoint. Counts distinct plans under
+    ``(client_id, target_id)`` with at least one actuals record.
+
+    Uses the session payload JSON to read ``brief.client_id`` and
+    ``brief.target_ids`` — not indexable, but ivy-scale is tiny."""
+    rows = _conn().execute(
+        "SELECT DISTINCT s.payload FROM sessions s "
+        "JOIN plans p ON p.brief_id = s.id "
+        "JOIN plan_actuals pa ON pa.plan_id = p.id "
+        "WHERE s.owner_id = ?",
+        (owner_id,),
+    ).fetchall()
+    n = 0
+    for r in rows:
+        sp = json.loads(r["payload"])
+        brief = sp.get("brief") or {}
+        if brief.get("client_id") == client_id and target_id in (brief.get("target_ids") or []):
+            n += 1
+    return n
 
 
 # ---------- Legacy JSON migration ----------

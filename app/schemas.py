@@ -87,6 +87,21 @@ class CommsSetup(BaseModel):
     kpi_ids: List[str] = Field(default_factory=list)
 
 
+class ChannelOverride(BaseModel):
+    """v6 · FR-31 — planner-supplied override for the system defaults.
+
+    Any field left as ``None`` means *use the system default*. Once a
+    value is set the optimizer and report paths should prefer it over
+    the static ``channel_metrics.json`` value."""
+    cpm_twd: Optional[float] = None
+    penetration_pct: Optional[float] = None
+    net_reach_pct: Optional[float] = None
+    buying_audience_000: Optional[int] = None
+    impressions: Optional[int] = None
+    # Channel id itself is the dict key on ``Brief.overrides`` — we don't
+    # re-store it here to avoid drift between key and value.
+
+
 class Brief(BaseModel):
     id: Optional[str] = None
     survey_id: Optional[str] = None
@@ -99,6 +114,8 @@ class Brief(BaseModel):
     planning_type: PlanningType = PlanningType.REACH
     comms: CommsSetup = Field(default_factory=CommsSetup)
     channel_ids: List[str] = Field(default_factory=list)
+    # v6 · FR-31 — planner-supplied overrides keyed by channel_id.
+    overrides: Dict[str, ChannelOverride] = Field(default_factory=dict)
 
     @field_validator("weeks")
     @classmethod
@@ -293,3 +310,47 @@ class StepPayload(BaseModel):
     optional_channel_ids: Optional[List[str]] = None
     constraints: Optional[Dict[str, AutoChannelConstraint]] = None
     action: Optional[str] = None  # e.g. "skip" / "back" / "apply_demo"
+    # v6 · FR-31 — planner overrides. Empty dict means "clear all overrides"
+    # (explicitly), None means "leave alone".
+    overrides: Optional[Dict[str, ChannelOverride]] = None
+
+
+# ---------- v6 · Actuals & learning loop ----------
+
+
+class ActualsScope(str, Enum):
+    WEEKLY = "WEEKLY"
+    FINAL = "FINAL"
+
+
+class ChannelActual(BaseModel):
+    """One channel's realised numbers for a given reporting window."""
+    spend_twd: float = 0.0
+    impressions: int = 0
+    cpm_twd: float = 0.0
+    net_reach_pct: float = 0.0
+    frequency: float = 0.0
+    penetration_pct: float = 0.0
+    buying_audience_000: int = 0
+
+
+class PlanActualsRecord(BaseModel):
+    """A single actuals record — either a weekly slice or an end-of-campaign
+    final snapshot. Uniqueness is enforced by storage: at most one FINAL
+    per plan, at most one WEEKLY per (plan, week).
+
+    ``plan_id`` is filled in by the route from the URL path — clients do
+    not need to repeat it in the request body."""
+    id: Optional[str] = None
+    plan_id: Optional[str] = None
+    recorded_by: Optional[str] = None
+    recorded_at: float = 0.0
+    scope: ActualsScope
+    period_week: Optional[int] = None  # required iff scope=WEEKLY
+    per_channel: Dict[str, ChannelActual] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+
+class PlanActualsWrite(BaseModel):
+    """Request envelope for PUT /api/plans/{id}/actuals."""
+    records: List[PlanActualsRecord] = Field(default_factory=list)
