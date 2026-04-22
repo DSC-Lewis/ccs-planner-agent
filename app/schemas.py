@@ -384,6 +384,12 @@ class CalibrationProfile(BaseModel):
     n_effective: float = 0.0
     confidence_score: int = 0
     last_updated: float = 0.0
+    # v6 · FR-30b — expose the individual inputs that feed into the
+    # confidence score so the frontend tooltip can render the formula
+    # breakdown without re-deriving them client-side.
+    sample_factor: float = 0.0
+    consistency_factor: float = 0.0
+    cv: float = 0.0
 
 
 class CalibrationSettingsGlobal(BaseModel):

@@ -519,17 +519,42 @@ def list_calibration_observations(
     metric: Optional[str] = None,
     user: User = Depends(current_user),
 ):
+    # v6 · FR-30 · issue 7 — enrich each row with its currently-contributing
+    # weight so the observation drawer can show "this row is worth X right
+    # now" without mentally computing 2^(-age/half_life).
+    import time as _time
     rows = calibration_service.list_observations(
         client_id=client_id, target_id=target_id,
         channel_id=channel_id, owner_id=user.id,
         metric=metric,
     )
-    return [r.model_dump(mode="json") for r in rows]
+    half_life = calibration_service.effective_half_life(
+        owner_id=user.id, client_id=client_id,
+        target_id=target_id, channel_id=channel_id,
+    )
+    now_ts = _time.time()
+    enriched = []
+    for r in rows:
+        d = r.model_dump(mode="json")
+        d["effective_weight"] = calibration_service.compute_effective_weight(
+            r, half_life,
+        )
+        d["age_days"] = max(0.0, (now_ts - float(r.observed_at)) / 86400.0)
+        enriched.append(d)
+    return enriched
 
 
 @app.patch("/api/calibration/observations/{obs_id}")
 def patch_calibration_observation(obs_id: str, body: ObservationWeightPatch,
                                   user: User = Depends(current_user)):
+    # v6 · FR-30 · issue 13 — validate range before persisting. None is
+    # still accepted (means "clear the override, fall back to decay").
+    if body.weight_override is not None and (
+        body.weight_override < 0 or body.weight_override > 1
+    ):
+        raise HTTPException(
+            422, "weight_override must be in [0, 1] or null to clear"
+        )
     ok = calibration_service.set_observation_weight(
         owner_id=user.id, observation_id=obs_id,
         weight_override=body.weight_override,
