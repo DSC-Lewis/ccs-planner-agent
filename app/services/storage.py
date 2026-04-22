@@ -184,6 +184,57 @@ CREATE TABLE IF NOT EXISTS plan_actuals_history (
 );
 CREATE INDEX IF NOT EXISTS idx_plan_actuals_history_plan
     ON plan_actuals_history(plan_id);
+
+-- v6 · FR-30 — CalibrationObservation append-only store + profile
+-- materialised view + settings.
+CREATE TABLE IF NOT EXISTS calibration_observations (
+    id               TEXT PRIMARY KEY,
+    owner_id         TEXT NOT NULL REFERENCES users(id),
+    client_id        TEXT NOT NULL,
+    target_id        TEXT NOT NULL,
+    channel_id       TEXT NOT NULL,
+    metric           TEXT NOT NULL,
+    value            REAL NOT NULL,
+    observed_at      REAL NOT NULL,
+    source_plan_id   TEXT,
+    source_actuals_id TEXT,
+    weight_override  REAL            -- NULL → derive from decay
+);
+CREATE INDEX IF NOT EXISTS idx_calobs_scope
+    ON calibration_observations(owner_id, client_id, target_id, channel_id, metric);
+
+CREATE TABLE IF NOT EXISTS calibration_profiles (
+    owner_id             TEXT NOT NULL REFERENCES users(id),
+    client_id            TEXT NOT NULL,
+    target_id            TEXT NOT NULL,
+    channel_id           TEXT NOT NULL,
+    metric               TEXT NOT NULL,
+    value_mean_weighted  REAL NOT NULL,
+    value_stdev          REAL NOT NULL,
+    n_raw                INTEGER NOT NULL,
+    n_effective          REAL NOT NULL,
+    confidence_score     INTEGER NOT NULL,
+    last_updated         REAL NOT NULL,
+    PRIMARY KEY (owner_id, client_id, target_id, channel_id, metric)
+);
+
+CREATE TABLE IF NOT EXISTS calibration_settings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id      TEXT NOT NULL REFERENCES users(id),
+    scope         TEXT NOT NULL,            -- 'global' | 'client' | 'channel'
+    client_id     TEXT,
+    target_id     TEXT,
+    channel_id    TEXT,
+    half_life_days REAL,
+    thresholds    TEXT                      -- JSON {high:int, mid:int}
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_calibration_settings_scope
+    ON calibration_settings(
+        owner_id, scope,
+        COALESCE(client_id, ''),
+        COALESCE(target_id, ''),
+        COALESCE(channel_id, '')
+    );
 """
 
 _SCHEMA_VERSION = 1
@@ -229,7 +280,9 @@ def list_tables() -> List[str]:
 def _count(table: str) -> int:
     # table name is NOT user-controlled — restrict to a fixed whitelist.
     assert table in {"users", "projects", "sessions", "plans",
-                     "conversations", "plan_actuals", "plan_actuals_history"}
+                     "conversations", "plan_actuals", "plan_actuals_history",
+                     "calibration_observations", "calibration_profiles",
+                     "calibration_settings"}
     c = _conn()
     return c.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
 
@@ -616,7 +669,9 @@ def reset() -> None:
     """Testing only — drop & recreate. Caller must reinit."""
     with _lock:
         c = _conn()
-        for t in ["plan_actuals_history", "plan_actuals",
+        for t in ["calibration_settings", "calibration_profiles",
+                  "calibration_observations",
+                  "plan_actuals_history", "plan_actuals",
                   "conversations", "plans", "sessions", "projects", "users",
                   "schema_version"]:
             c.execute(f"DROP TABLE IF EXISTS {t}")
