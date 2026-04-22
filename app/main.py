@@ -28,10 +28,12 @@ from .config import (
 )
 from .schemas import (
     AgentSession,
+    CalibrationSettingsWrite,
     ConversationTurn,
     CreateProjectRequest,
     CreateSessionRequest,
     CreateUserRequest,
+    ObservationWeightPatch,
     Plan,
     PlanActualsWrite,
     Project,
@@ -42,6 +44,7 @@ from .schemas import (
 )
 from .services import actuals as actuals_service
 from .services import agent as agent_service
+from .services import calibration as calibration_service
 from .services import optimizer, reference, storage
 from .services.auth import APIKeyMiddleware
 from .services.rate_limit import RateLimitMiddleware
@@ -377,6 +380,21 @@ def put_plan_actuals(plan_id: str, body: PlanActualsWrite,
     stored = storage.upsert_actuals_records(
         plan_id, normalised, owner_id=user.id, recorded_by=user.id,
     )
+    # v6 · FR-30 — feed the learning loop. Guarded — if the brief's
+    # session is missing (shouldn't happen) we silently skip instead of
+    # 500-ing (NFR-7.4).
+    try:
+        brief_session = storage.get_session(plan.brief_id, owner_id=user.id)
+        if brief_session is not None:
+            for rec in stored:
+                calibration_service.record_from_actuals(
+                    plan_brief=brief_session.brief,
+                    actuals_record=rec,
+                    owner_id=user.id,
+                )
+    except Exception:
+        # Don't fail the PUT just because calibration couldn't absorb.
+        pass
     return {"records": [r.model_dump(mode="json") for r in stored]}
 
 
@@ -417,16 +435,108 @@ def get_plan_report_html(plan_id: str, user: User = Depends(current_user)):
 @app.get("/api/calibration/coverage")
 def calibration_coverage(client_id: str, target_id: str,
                          user: User = Depends(current_user)):
-    """Banner-driver. PR A surfaces `has_history` + `n`; PR B extends
-    this payload with `confidence_score` once the profile layer lands."""
+    """Banner-driver. Returns has_history + observation count + an
+    aggregate confidence score (the max across calibrated metrics for
+    this client × target, since that's the headline number the banner
+    decision is really about)."""
     n = storage.count_actuals_for_client_target(client_id, target_id,
                                                 owner_id=user.id)
+    # Best-of confidence across all calibrated metrics for the scope.
+    confidence_score: Optional[int] = None
+    try:
+        profiles = [p for p in calibration_service.list_profiles(user.id)
+                    if p.client_id == client_id and p.target_id == target_id]
+        if profiles:
+            confidence_score = max(p.confidence_score for p in profiles)
+    except Exception:
+        confidence_score = None
     return {
         "client_id": client_id,
         "target_id": target_id,
         "has_history": n > 0,
         "n": n,
+        "confidence_score": confidence_score,
     }
+
+
+# ---------- Calibration settings / profiles / observations (v6 · FR-34) ----------
+
+@app.get("/api/calibration/settings")
+def get_calibration_settings(user: User = Depends(current_user)):
+    return calibration_service.get_settings(user.id)
+
+
+@app.put("/api/calibration/settings")
+def put_calibration_settings(body: CalibrationSettingsWrite,
+                              user: User = Depends(current_user)):
+    scope = body.scope
+    if scope not in {"global", "client", "channel"}:
+        raise HTTPException(422, "scope must be one of global / client / channel")
+    if scope == "client" and not body.client_id:
+        raise HTTPException(422, "client scope requires client_id")
+    if scope == "channel" and not (body.client_id and body.target_id and body.channel_id):
+        raise HTTPException(422, "channel scope requires client_id, target_id, channel_id")
+    if body.half_life_days is not None:
+        calibration_service.set_half_life(
+            owner_id=user.id,
+            client_id=body.client_id,
+            target_id=body.target_id,
+            channel_id=body.channel_id,
+            half_life_days=float(body.half_life_days),
+        )
+    if body.thresholds:
+        calibration_service.set_confidence_thresholds(
+            owner_id=user.id,
+            high=int(body.thresholds.get("high", 70)),
+            mid=int(body.thresholds.get("mid", 40)),
+        )
+    return calibration_service.get_settings(user.id)
+
+
+@app.delete("/api/calibration/settings")
+def delete_calibration_settings(
+    scope: str,
+    client_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    user: User = Depends(current_user),
+):
+    ok = calibration_service.reset_scope(
+        owner_id=user.id, scope=scope,
+        client_id=client_id, target_id=target_id, channel_id=channel_id,
+    )
+    return {"reset": ok}
+
+
+@app.get("/api/calibration/profiles")
+def list_calibration_profiles(user: User = Depends(current_user)):
+    return [p.model_dump(mode="json") for p in calibration_service.list_profiles(user.id)]
+
+
+@app.get("/api/calibration/observations")
+def list_calibration_observations(
+    client_id: str, target_id: str, channel_id: str,
+    metric: Optional[str] = None,
+    user: User = Depends(current_user),
+):
+    rows = calibration_service.list_observations(
+        client_id=client_id, target_id=target_id,
+        channel_id=channel_id, owner_id=user.id,
+        metric=metric,
+    )
+    return [r.model_dump(mode="json") for r in rows]
+
+
+@app.patch("/api/calibration/observations/{obs_id}")
+def patch_calibration_observation(obs_id: str, body: ObservationWeightPatch,
+                                  user: User = Depends(current_user)):
+    ok = calibration_service.set_observation_weight(
+        owner_id=user.id, observation_id=obs_id,
+        weight_override=body.weight_override,
+    )
+    if not ok:
+        raise HTTPException(404, "Observation not found")
+    return {"id": obs_id, "weight_override": body.weight_override}
 
 
 @app.post("/api/plans/compare")

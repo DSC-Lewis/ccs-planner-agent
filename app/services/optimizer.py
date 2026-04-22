@@ -24,6 +24,42 @@ from ..schemas import (
 from . import reference
 
 
+# ---------- v6 · FR-30 — CPM resolution (profile-aware) ----------
+
+def default_channel_cpm(channel_id: str) -> float:
+    """Return the static CPM from ``channel_metrics.json``. Zero when the
+    channel id is unknown so the caller can branch."""
+    m = reference.channel_metrics().get(channel_id)
+    return float(m.cpm_twd) if m else 0.0
+
+
+def resolve_channel_cpm(*, channel_id: str, client_id: Optional[str],
+                        target_id: Optional[str], owner_id: str) -> float:
+    """Prefer a calibrated CPM from the learning loop; fall back to the
+    static default when no profile exists for this triple.
+
+    Lazy-imports :mod:`calibration` to avoid bootstrap cycles — the
+    calibration module already depends on ``optimizer.default_channel_cpm``
+    during test-driven rematerialisation.
+    """
+    if client_id and target_id:
+        try:
+            from . import calibration as _cal  # local import to dodge cycle
+            prof = _cal.get_profile(
+                client_id=client_id, target_id=target_id,
+                channel_id=channel_id, metric="cpm_twd",
+                owner_id=owner_id,
+            )
+        except Exception:
+            prof = None
+        # Guard against floating-point weight slipping just under 1 for
+        # a freshly-observed row. n_raw is exact, and "any meaningful
+        # observation" is the semantics we want.
+        if prof and prof.n_raw >= 1 and prof.n_effective > 0:
+            return float(prof.value_mean_weighted)
+    return default_channel_cpm(channel_id)
+
+
 # ---------- helpers ----------
 
 def _impressions_from_budget(budget: float, cpm: float) -> int:

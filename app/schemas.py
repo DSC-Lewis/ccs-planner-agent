@@ -354,3 +354,71 @@ class PlanActualsRecord(BaseModel):
 class PlanActualsWrite(BaseModel):
     """Request envelope for PUT /api/plans/{id}/actuals."""
     records: List[PlanActualsRecord] = Field(default_factory=list)
+
+
+# ---------- v6 · CalibrationObservation / CalibrationProfile ----------
+
+
+class CalibrationObservation(BaseModel):
+    id: str
+    owner_id: str
+    client_id: str
+    target_id: str
+    channel_id: str
+    metric: str
+    value: float
+    observed_at: float   # unix seconds
+    source_plan_id: Optional[str] = None
+    source_actuals_id: Optional[str] = None
+    weight_override: Optional[float] = None  # 0..1; None → use decay weight
+
+
+class CalibrationProfile(BaseModel):
+    client_id: str
+    target_id: str
+    channel_id: str
+    metric: str
+    value_mean_weighted: float = 0.0
+    value_stdev: float = 0.0
+    n_raw: int = 0
+    n_effective: float = 0.0
+    confidence_score: int = 0
+    last_updated: float = 0.0
+
+
+class CalibrationSettingsGlobal(BaseModel):
+    half_life_days: float = 180
+    thresholds: Dict[str, int] = Field(default_factory=lambda: {"high": 70, "mid": 40})
+
+
+class CalibrationSettingsOverride(BaseModel):
+    """Per-scope override. At most one of client_id/target_id/channel_id
+    chains may be set, forming the scope hierarchy:
+        global  < client < (client,target) < (client,target,channel)
+    """
+    client_id: Optional[str] = None
+    target_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    half_life_days: float
+
+
+class CalibrationSettingsRead(BaseModel):
+    global_: CalibrationSettingsGlobal = Field(alias="global",
+                                                default_factory=CalibrationSettingsGlobal)
+    per_client: List[CalibrationSettingsOverride] = Field(default_factory=list)
+    per_channel: List[CalibrationSettingsOverride] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
+
+
+class CalibrationSettingsWrite(BaseModel):
+    scope: str   # 'global' | 'client' | 'channel'
+    client_id: Optional[str] = None
+    target_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    half_life_days: Optional[float] = None
+    thresholds: Optional[Dict[str, int]] = None
+
+
+class ObservationWeightPatch(BaseModel):
+    weight_override: Optional[float] = None
