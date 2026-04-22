@@ -2031,6 +2031,10 @@ async function openCalibrationSettings() {
     try {
       const settings = await apiFetch("/api/calibration/settings").then(r => r.json());
       const profiles = await apiFetch("/api/calibration/profiles").then(r => r.json());
+      // v6 gap-audit · Issue 19 — global scope is admin-only (PRD §FR-34).
+      // Non-admins see the value as read-only with an explanatory note.
+      const me = await api.me().catch(() => null);
+      const isAdmin = !!(me && me.is_admin);
 
       // Global half-life slider
       const hlCurrent = settings?.global?.half_life_days ?? 180;
@@ -2041,41 +2045,57 @@ async function openCalibrationSettings() {
       const hlSlider = el("input", {
         type: "range", min: "30", max: "365", step: "30",
         value: String(hlCurrent),
+        ...(isAdmin ? {} : { disabled: "" }),
         style: "width:100%",
       });
       const hlNumber = el("input", {
         type: "number", value: String(hlCurrent), step: "1", min: "1",
+        ...(isAdmin ? {} : { disabled: "", readonly: "" }),
         style: "width:90px;margin-left:8px",
       });
       hlSlider.oninput = () => { hlNumber.value = hlSlider.value; };
       hlNumber.oninput = () => { hlSlider.value = hlNumber.value; };
-      const hlApply = el("button", {
-        style: "padding:6px 14px;border:0;background:#8B5CF6;color:#fff;border-radius:999px;cursor:pointer;margin-left:8px",
-        onclick: async () => {
-          const days = Number(hlNumber.value);
-          if (!(days > 0)) return;
-          await apiFetch("/api/calibration/settings", {
-            method: "PUT",
-            body: JSON.stringify({ scope: "global", half_life_days: days }),
-          });
-          botSay(`已將 half_life_days 設為 ${days} 天。`);
-          refresh();
-        },
-      }, "套用");
-      const hlReset = el("button", {
-        style: "padding:6px 14px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;margin-left:6px",
-        onclick: async () => {
-          await apiFetch("/api/calibration/settings?scope=global", { method: "DELETE" });
-          botSay("已還原 global half_life_days = 180 天。");
-          refresh();
-        },
-      }, "還原預設");
+
+      // Build the action row conditionally — admins get apply/reset;
+      // non-admins get a short "由 admin 管理" note instead.
+      const actionRow = el("div",
+        { style: "display:flex;align-items:center;gap:4px;margin-top:6px" },
+        hlSlider, hlNumber);
+      if (isAdmin) {
+        const hlApply = el("button", {
+          style: "padding:6px 14px;border:0;background:#8B5CF6;color:#fff;border-radius:999px;cursor:pointer;margin-left:8px",
+          onclick: async () => {
+            const days = Number(hlNumber.value);
+            if (!(days > 0)) return;
+            try {
+              await apiFetch("/api/calibration/settings", {
+                method: "PUT",
+                body: JSON.stringify({ scope: "global", half_life_days: days }),
+              });
+              botSay(`已將 half_life_days 設為 ${days} 天。`);
+            } catch (e) { showError(e); }
+            refresh();
+          },
+        }, "套用");
+        const hlReset = el("button", {
+          style: "padding:6px 14px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer;margin-left:6px",
+          onclick: async () => {
+            try {
+              await apiFetch("/api/calibration/settings?scope=global", { method: "DELETE" });
+              botSay("已還原 global half_life_days = 180 天。");
+            } catch (e) { showError(e); }
+            refresh();
+          },
+        }, "還原預設");
+        actionRow.append(hlApply, hlReset);
+      } else {
+        actionRow.append(el("span", {
+          style: "margin-left:8px;font-size:12px;color:#6B7280;font-style:italic",
+        }, "由 admin 管理 · 唯讀（可至 per-client / per-channel 調整你自己的 override）"));
+      }
       body.append(
         el("div", { style: "margin-bottom:18px;padding:12px;border:1px solid #E5E7EB;border-radius:8px" },
-          hlLabel,
-          el("div", { style: "display:flex;align-items:center;gap:4px;margin-top:6px" },
-            hlSlider, hlNumber, hlApply, hlReset),
-        ),
+          hlLabel, actionRow),
       );
 
       // Profiles table

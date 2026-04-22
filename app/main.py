@@ -476,6 +476,15 @@ def put_calibration_settings(body: CalibrationSettingsWrite,
         raise HTTPException(422, "client scope requires client_id")
     if scope == "channel" and not (body.client_id and body.target_id and body.channel_id):
         raise HTTPException(422, "channel scope requires client_id, target_id, channel_id")
+    # v6 gap-audit · Issue 19 — PRD §FR-34 "Global defaults (read-only unless admin)".
+    # Per-client / per-channel scopes stay open to any authenticated user so
+    # they can tune their own tenant; only the global bucket is admin-only.
+    if scope == "global" and not user.is_admin:
+        raise HTTPException(
+            403,
+            "Global calibration settings are admin-only. Use scope=client or "
+            "scope=channel to tune your own overrides."
+        )
     if body.half_life_days is not None:
         calibration_service.set_half_life(
             owner_id=user.id,
@@ -501,6 +510,13 @@ def delete_calibration_settings(
     channel_id: Optional[str] = None,
     user: User = Depends(current_user),
 ):
+    # v6 gap-audit · Issue 19 — same admin guard as PUT (see above).
+    if scope == "global" and not user.is_admin:
+        raise HTTPException(
+            403,
+            "Global calibration settings are admin-only. Use scope=client or "
+            "scope=channel to reset your own overrides."
+        )
     ok = calibration_service.reset_scope(
         owner_id=user.id, scope=scope,
         client_id=client_id, target_id=target_id, channel_id=channel_id,

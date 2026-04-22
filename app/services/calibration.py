@@ -232,19 +232,67 @@ def _upsert_setting(c: sqlite3.Connection, *, owner_id: str, scope: str,
         )
 
 
+def _current_half_life_raw(*, owner_id: str, scope: str,
+                            client_id: Optional[str],
+                            target_id: Optional[str],
+                            channel_id: Optional[str]) -> Optional[float]:
+    """Return the currently-stored half-life for this exact scope tuple,
+    or None if no override exists yet. Used by the no-op guard so we
+    don't rematerialise when the planner writes the same value twice."""
+    row = storage._conn().execute(
+        "SELECT half_life_days FROM calibration_settings "
+        "WHERE owner_id=? AND scope=? "
+        "AND COALESCE(client_id,'')=COALESCE(?, '') "
+        "AND COALESCE(target_id,'')=COALESCE(?, '') "
+        "AND COALESCE(channel_id,'')=COALESCE(?, '')",
+        (owner_id, scope, client_id, target_id, channel_id),
+    ).fetchone()
+    return row["half_life_days"] if row else None
+
+
+def _current_thresholds_raw(owner_id: str) -> Optional[dict]:
+    row = storage._conn().execute(
+        "SELECT thresholds FROM calibration_settings "
+        "WHERE owner_id=? AND scope='global' AND client_id IS NULL",
+        (owner_id,),
+    ).fetchone()
+    if not row or not row["thresholds"]:
+        return None
+    try:
+        return json.loads(row["thresholds"])
+    except json.JSONDecodeError:
+        return None
+
+
 def set_half_life(*, owner_id: str,
                   client_id: Optional[str] = None,
                   target_id: Optional[str] = None,
                   channel_id: Optional[str] = None,
                   half_life_days: float) -> None:
     """Upsert a half-life override. Scope is inferred from which ids
-    are non-None."""
+    are non-None.
+
+    v6 gap-audit · Issue 18 — when the new value matches what's already
+    stored, short-circuit. Rematerialisation is O(N_observations) per
+    owner and walking it for a no-op write would nuke the half-life
+    slider's UX under even mild clicking.
+    """
     if channel_id is not None:
         scope = "channel"
     elif client_id is not None:
         scope = "client"
     else:
         scope = "global"
+
+    # No-op guard: skip the upsert + rematerialise when the existing row
+    # already holds this exact value.
+    current = _current_half_life_raw(
+        owner_id=owner_id, scope=scope,
+        client_id=client_id, target_id=target_id, channel_id=channel_id,
+    )
+    if current is not None and float(current) == float(half_life_days):
+        return
+
     c = storage._conn()
     _upsert_setting(c, owner_id=owner_id, scope=scope,
                     client_id=client_id, target_id=target_id,
@@ -255,6 +303,15 @@ def set_half_life(*, owner_id: str,
 
 def set_confidence_thresholds(*, owner_id: str,
                                high: int, mid: int) -> None:
+    """Upsert the confidence thresholds. v6 gap-audit · Issue 18 —
+    short-circuit when the new high/mid pair matches what's already
+    stored, same rationale as set_half_life."""
+    current = _current_thresholds_raw(owner_id)
+    if current is not None \
+            and int(current.get("high", -1)) == int(high) \
+            and int(current.get("mid", -1)) == int(mid):
+        return
+
     c = storage._conn()
     _upsert_setting(c, owner_id=owner_id, scope="global",
                     client_id=None, target_id=None, channel_id=None,
