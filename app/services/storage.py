@@ -684,47 +684,59 @@ def _archive_actuals_row(c: sqlite3.Connection, row: sqlite3.Row) -> None:
 def upsert_actuals_records(plan_id: str, records: List[PlanActualsRecord],
                            *, owner_id: str,
                            recorded_by: Optional[str] = None) -> List[PlanActualsRecord]:
-    """Replace weekly/final rows, archiving superseded copies."""
+    """Replace weekly/final rows, archiving superseded copies.
+
+    Atomic: wraps the whole batch in an explicit transaction so a bad
+    record mid-batch doesn't leave the DB half-updated. ``isolation_level``
+    on the connection is ``None`` (autocommit) so we need BEGIN/COMMIT
+    explicitly.
+    """
     out: List[PlanActualsRecord] = []
     with _lock:
         c = _conn()
-        for rec in records:
-            scope = rec.scope.value if isinstance(rec.scope, ActualsScope) else str(rec.scope)
-            period_week = rec.period_week if scope == "WEEKLY" else None
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            for rec in records:
+                scope = rec.scope.value if isinstance(rec.scope, ActualsScope) else str(rec.scope)
+                period_week = rec.period_week if scope == "WEEKLY" else None
 
-            # Find any existing row we'd supersede.
-            if scope == "FINAL":
-                existing = c.execute(
-                    "SELECT * FROM plan_actuals WHERE plan_id = ? AND scope = 'FINAL'",
-                    (plan_id,),
-                ).fetchone()
-            else:
-                existing = c.execute(
-                    "SELECT * FROM plan_actuals "
-                    "WHERE plan_id = ? AND scope = 'WEEKLY' AND period_week = ?",
-                    (plan_id, period_week),
-                ).fetchone()
-            if existing:
-                _archive_actuals_row(c, existing)
-                c.execute("DELETE FROM plan_actuals WHERE id = ?", (existing["id"],))
+                # Find any existing row we'd supersede.
+                if scope == "FINAL":
+                    existing = c.execute(
+                        "SELECT * FROM plan_actuals WHERE plan_id = ? AND scope = 'FINAL'",
+                        (plan_id,),
+                    ).fetchone()
+                else:
+                    existing = c.execute(
+                        "SELECT * FROM plan_actuals "
+                        "WHERE plan_id = ? AND scope = 'WEEKLY' AND period_week = ?",
+                        (plan_id, period_week),
+                    ).fetchone()
+                if existing:
+                    _archive_actuals_row(c, existing)
+                    c.execute("DELETE FROM plan_actuals WHERE id = ?", (existing["id"],))
 
-            rid = rec.id or _new_id("act")
-            now = _now()
-            rec_to_store = PlanActualsRecord(
-                id=rid, plan_id=plan_id,
-                recorded_by=recorded_by, recorded_at=now,
-                scope=scope, period_week=period_week,
-                per_channel=rec.per_channel, notes=rec.notes,
-            )
-            c.execute(
-                "INSERT INTO plan_actuals(id, plan_id, owner_id, recorded_by, "
-                "recorded_at, scope, period_week, payload, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (rid, plan_id, owner_id, recorded_by, now, scope, period_week,
-                 json.dumps(rec_to_store.model_dump(mode="json"), ensure_ascii=False),
-                 rec.notes),
-            )
-            out.append(rec_to_store)
+                rid = rec.id or _new_id("act")
+                now = _now()
+                rec_to_store = PlanActualsRecord(
+                    id=rid, plan_id=plan_id,
+                    recorded_by=recorded_by, recorded_at=now,
+                    scope=scope, period_week=period_week,
+                    per_channel=rec.per_channel, notes=rec.notes,
+                )
+                c.execute(
+                    "INSERT INTO plan_actuals(id, plan_id, owner_id, recorded_by, "
+                    "recorded_at, scope, period_week, payload, notes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (rid, plan_id, owner_id, recorded_by, now, scope, period_week,
+                     json.dumps(rec_to_store.model_dump(mode="json"), ensure_ascii=False),
+                     rec.notes),
+                )
+                out.append(rec_to_store)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
     return out
 
 
