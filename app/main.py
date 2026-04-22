@@ -33,12 +33,14 @@ from .schemas import (
     CreateSessionRequest,
     CreateUserRequest,
     Plan,
+    PlanActualsWrite,
     Project,
     SessionMode,
     SessionStepResponse,
     StepPayload,
     User,
 )
+from .services import actuals as actuals_service
 from .services import agent as agent_service
 from .services import optimizer, reference, storage
 from .services.auth import APIKeyMiddleware
@@ -341,6 +343,90 @@ def get_plan(plan_id: str, user: User = Depends(current_user)):
     if not plan:
         raise HTTPException(404, f"Plan '{plan_id}' not found.")
     return plan
+
+
+# ---------- Plan actuals (v6 · FR-27..29) ----------
+
+def _get_plan_or_404(plan_id: str, user: User) -> Plan:
+    plan = storage.get_plan(plan_id, owner_id=user.id)
+    if not plan:
+        raise HTTPException(404, f"Plan '{plan_id}' not found.")
+    return plan
+
+
+@app.get("/api/plans/{plan_id}/actuals")
+def get_plan_actuals(plan_id: str, user: User = Depends(current_user)):
+    _get_plan_or_404(plan_id, user)
+    rows = storage.list_actuals(plan_id, owner_id=user.id)
+    return [r.model_dump(mode="json") for r in rows]
+
+
+@app.put("/api/plans/{plan_id}/actuals")
+def put_plan_actuals(plan_id: str, body: PlanActualsWrite,
+                     user: User = Depends(current_user)):
+    plan = _get_plan_or_404(plan_id, user)
+    plan_weeks = len(plan.allocations[0].weeks) if plan.allocations else 0
+    # Validate + normalise every record before touching the DB.
+    for rec in body.records:
+        try:
+            actuals_service.validate_record(rec, plan_weeks=plan_weeks)
+        except actuals_service.ActualsError as e:
+            raise HTTPException(422, str(e))
+    # Make sure plan_id on each record matches the URL.
+    normalised = [rec.model_copy(update={"plan_id": plan_id}) for rec in body.records]
+    stored = storage.upsert_actuals_records(
+        plan_id, normalised, owner_id=user.id, recorded_by=user.id,
+    )
+    return {"records": [r.model_dump(mode="json") for r in stored]}
+
+
+@app.delete("/api/plans/{plan_id}/actuals/{record_id}")
+def delete_plan_actuals_record(plan_id: str, record_id: str,
+                               user: User = Depends(current_user)):
+    _get_plan_or_404(plan_id, user)
+    ok = storage.delete_actuals_record(plan_id, record_id, owner_id=user.id)
+    if not ok:
+        raise HTTPException(404, "Actuals record not found.")
+    return {"deleted": True}
+
+
+@app.get("/api/plans/{plan_id}/actuals/history")
+def get_plan_actuals_history(plan_id: str, user: User = Depends(current_user)):
+    _get_plan_or_404(plan_id, user)
+    return storage.list_actuals_history(plan_id, owner_id=user.id)
+
+
+@app.get("/api/plans/{plan_id}/report")
+def get_plan_report(plan_id: str, user: User = Depends(current_user)):
+    plan = _get_plan_or_404(plan_id, user)
+    records = storage.list_actuals(plan_id, owner_id=user.id)
+    return actuals_service.build_report(plan, records)
+
+
+@app.get("/api/plans/{plan_id}/report.html")
+def get_plan_report_html(plan_id: str, user: User = Depends(current_user)):
+    from fastapi.responses import HTMLResponse
+    plan = _get_plan_or_404(plan_id, user)
+    records = storage.list_actuals(plan_id, owner_id=user.id)
+    report = actuals_service.build_report(plan, records)
+    return HTMLResponse(actuals_service.render_report_html(plan, report))
+
+
+# ---------- Calibration coverage (v6 · FR-32) ----------
+
+@app.get("/api/calibration/coverage")
+def calibration_coverage(client_id: str, target_id: str,
+                         user: User = Depends(current_user)):
+    """Banner-driver. PR A surfaces `has_history` + `n`; PR B extends
+    this payload with `confidence_score` once the profile layer lands."""
+    n = storage.count_actuals_for_client_target(client_id, target_id,
+                                                owner_id=user.id)
+    return {
+        "client_id": client_id,
+        "target_id": target_id,
+        "has_history": n > 0,
+        "n": n,
+    }
 
 
 @app.post("/api/plans/compare")
