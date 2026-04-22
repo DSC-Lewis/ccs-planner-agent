@@ -1985,6 +1985,12 @@ const CONFIDENCE_COPY = {
   low:  "資料不足 · 建議先用 system default",
 };
 
+function _bucketForScore(score, thresholds) {
+  const hi = thresholds?.high ?? 70;
+  const mid = thresholds?.mid ?? 40;
+  return score >= hi ? "high" : score >= mid ? "mid" : "low";
+}
+
 function _confidenceBadge(score, bucket) {
   const colour = bucket === "high" ? "#10B981"
                : bucket === "mid"  ? "#F59E0B"
@@ -2090,9 +2096,7 @@ async function openCalibrationSettings() {
         )));
         const tbody = el("tbody", {});
         profiles.forEach(p => {
-          const bucket = p.confidence_score >= (settings?.global?.thresholds?.high ?? 70) ? "high"
-                       : p.confidence_score >= (settings?.global?.thresholds?.mid  ?? 40) ? "mid"
-                       : "low";
+          const bucket = _bucketForScore(p.confidence_score, settings?.global?.thresholds);
           const cls = `confidence-${bucket}`;
           tbody.append(el("tr", { class: cls },
             el("td", {}, p.client_id),
@@ -2209,8 +2213,6 @@ renderPlanReport = async function(plan) {
     const targetId = (sess.session?.brief?.target_ids || [])[0];
     if (!clientId || !targetId) return;
     const settings = await apiFetch("/api/calibration/settings").then(r => r.json());
-    const hi = settings?.global?.thresholds?.high ?? 70;
-    const mid = settings?.global?.thresholds?.mid ?? 40;
     const profiles = await apiFetch("/api/calibration/profiles").then(r => r.json());
     const byCh = {};
     profiles.forEach(p => {
@@ -2223,8 +2225,7 @@ renderPlanReport = async function(plan) {
       const ch = tr.children[0]?.textContent;
       const p = byCh[ch];
       if (!p) return;
-      const bucket = p.confidence_score >= hi ? "high"
-                   : p.confidence_score >= mid ? "mid" : "low";
+      const bucket = _bucketForScore(p.confidence_score, settings?.global?.thresholds);
       const badgeTd = el("td", {}, _confidenceBadge(p.confidence_score, bucket));
       tr.append(badgeTd);
     });
