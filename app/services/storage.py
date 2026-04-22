@@ -126,8 +126,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_owner ON sessions(owner_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_scope
-    ON sessions(owner_id, client_id, first_target_id);
+-- NOTE: idx_sessions_scope is NOT created here — it references the v6
+-- denormalised columns client_id + first_target_id which may not exist
+-- yet on a pre-v6 DB. init_schema() creates it AFTER the ALTER TABLE
+-- migrations guarantee the columns are present.
 
 CREATE TABLE IF NOT EXISTS plans (
     id          TEXT PRIMARY KEY,
