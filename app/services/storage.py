@@ -877,22 +877,20 @@ def count_actuals_for_client_target(client_id: str, target_id: str,
     """Used by the banner-coverage endpoint. Counts distinct plans under
     ``(client_id, target_id)`` with at least one actuals record.
 
-    Uses the session payload JSON to read ``brief.client_id`` and
-    ``brief.target_ids`` — not indexable, but ivy-scale is tiny."""
-    rows = _conn().execute(
-        "SELECT DISTINCT s.payload FROM sessions s "
+    v6 · Issue 14 — uses the denormalised ``sessions.client_id`` +
+    ``sessions.first_target_id`` columns (populated on every save; backfilled
+    in ``init_schema``) to avoid JSON-decoding every session row. Matches the
+    v6 calibration fan-out semantics, which also key on the brief's first
+    target id only.
+    """
+    row = _conn().execute(
+        "SELECT COUNT(DISTINCT p.id) AS n FROM sessions s "
         "JOIN plans p ON p.brief_id = s.id "
         "JOIN plan_actuals pa ON pa.plan_id = p.id "
-        "WHERE s.owner_id = ?",
-        (owner_id,),
-    ).fetchall()
-    n = 0
-    for r in rows:
-        sp = json.loads(r["payload"])
-        brief = sp.get("brief") or {}
-        if brief.get("client_id") == client_id and target_id in (brief.get("target_ids") or []):
-            n += 1
-    return n
+        "WHERE s.owner_id = ? AND s.client_id = ? AND s.first_target_id = ?",
+        (owner_id, client_id, target_id),
+    ).fetchone()
+    return int(row["n"] or 0) if row else 0
 
 
 # ---------- Legacy JSON migration ----------

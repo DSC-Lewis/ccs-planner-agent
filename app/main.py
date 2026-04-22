@@ -564,6 +564,59 @@ def patch_calibration_observation(obs_id: str, body: ObservationWeightPatch,
     return {"id": obs_id, "weight_override": body.weight_override}
 
 
+# ---------- Calibration channel summary (v6 · CAL pill data) ----------
+
+@app.get("/api/calibration/channel-summary")
+def calibration_channel_summary(client_id: str, target_id: str,
+                                user: User = Depends(current_user)):
+    """CAL-pill data source. Per-channel summary of calibration state for
+    the given (client_id, target_id) scope, owned by the calling user.
+
+    For every known channel id we return:
+      * ``has_profile`` — True iff ANY metric has at least one observation.
+      * ``confidence_score`` — max score across tracked metrics (matches
+        the banner's aggregate logic); None when no profile exists.
+      * ``bucket`` — traffic-light bucket (high/mid/low) via
+        :func:`calibration.confidence_bucket`; None when no profile.
+      * ``metrics`` — list of metric keys with n_raw >= 1.
+    """
+    profiles = [p for p in calibration_service.list_profiles(user.id)
+                if p.client_id == client_id and p.target_id == target_id]
+    by_channel: dict = {}
+    for p in profiles:
+        if p.n_raw < 1:
+            continue
+        slot = by_channel.setdefault(p.channel_id, {
+            "metrics": [], "max_score": 0,
+        })
+        if p.metric not in slot["metrics"]:
+            slot["metrics"].append(p.metric)
+        if p.confidence_score > slot["max_score"]:
+            slot["max_score"] = p.confidence_score
+
+    out: dict = {}
+    for ch in reference.all_channel_ids():
+        slot = by_channel.get(ch)
+        if slot and slot["metrics"]:
+            score = int(slot["max_score"])
+            out[ch] = {
+                "has_profile": True,
+                "confidence_score": score,
+                "bucket": calibration_service.confidence_bucket(
+                    score, owner_id=user.id,
+                ),
+                "metrics": slot["metrics"],
+            }
+        else:
+            out[ch] = {
+                "has_profile": False,
+                "confidence_score": None,
+                "bucket": None,
+                "metrics": [],
+            }
+    return out
+
+
 @app.post("/api/plans/compare")
 def compare_plans(plan_ids: List[str], user: User = Depends(current_user)):
     plans = [storage.get_plan(p, owner_id=user.id) for p in plan_ids]

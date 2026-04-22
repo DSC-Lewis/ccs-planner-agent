@@ -15,6 +15,7 @@ from ..schemas import (
     AutomaticPlanInput,
     Brief,
     ChannelAllocation,
+    ChannelOverride,
     ManualPlanInput,
     PerformanceSummary,
     Plan,
@@ -24,7 +25,7 @@ from ..schemas import (
 from . import reference
 
 
-# ---------- v6 · FR-30 — CPM resolution (profile-aware) ----------
+# ---------- v6 · FR-30 / FR-31 — metric resolution (override → calibration → default) ----------
 
 def default_channel_cpm(channel_id: str) -> float:
     """Return the static CPM from ``channel_metrics.json``. Zero when the
@@ -33,31 +34,76 @@ def default_channel_cpm(channel_id: str) -> float:
     return float(m.cpm_twd) if m else 0.0
 
 
-def resolve_channel_cpm(*, channel_id: str, client_id: Optional[str],
-                        target_id: Optional[str], owner_id: str) -> float:
-    """Prefer a calibrated CPM from the learning loop; fall back to the
-    static default when no profile exists for this triple.
+def default_channel_penetration(channel_id: str) -> float:
+    """Return the static penetration % from ``channel_metrics.json``. Zero
+    when the channel id is unknown."""
+    m = reference.channel_metrics().get(channel_id)
+    return float(m.penetration_pct) if m else 0.0
 
-    Lazy-imports :mod:`calibration` to avoid bootstrap cycles — the
-    calibration module already depends on ``optimizer.default_channel_cpm``
-    during test-driven rematerialisation.
+
+def _resolve_metric(*, channel_id: str, metric: str,
+                    client_id: Optional[str], target_id: Optional[str],
+                    owner_id: Optional[str],
+                    brief_override: Optional[float],
+                    static_default: float) -> float:
+    """Pick in order: explicit Brief override → calibration profile → static
+    default. Calibration is consulted only when owner+client+target are
+    all present AND the profile has at least one observation with positive
+    effective weight.
     """
-    if client_id and target_id:
+    if brief_override is not None:
+        return float(brief_override)
+    if owner_id and client_id and target_id:
         try:
-            from . import calibration as _cal  # local import to dodge cycle
+            from . import calibration as _cal  # lazy import to dodge cycle
             prof = _cal.get_profile(
                 client_id=client_id, target_id=target_id,
-                channel_id=channel_id, metric="cpm_twd",
+                channel_id=channel_id, metric=metric,
                 owner_id=owner_id,
             )
         except Exception:
             prof = None
-        # Guard against floating-point weight slipping just under 1 for
-        # a freshly-observed row. n_raw is exact, and "any meaningful
-        # observation" is the semantics we want.
         if prof and prof.n_raw >= 1 and prof.n_effective > 0:
             return float(prof.value_mean_weighted)
-    return default_channel_cpm(channel_id)
+    return static_default
+
+
+def _override_for(brief: Optional[Brief], channel_id: str) -> Optional[ChannelOverride]:
+    if not brief:
+        return None
+    return (brief.overrides or {}).get(channel_id)
+
+
+def resolve_channel_cpm(*, channel_id: str, client_id: Optional[str],
+                        target_id: Optional[str], owner_id: Optional[str] = None,
+                        brief_override: Optional[float] = None) -> float:
+    """Prefer (1) planner brief override, (2) calibrated CPM from the
+    learning loop, then (3) the static default.
+
+    ``brief_override`` is the numeric cpm_twd value the planner typed; pass
+    ``None`` to skip. ``owner_id`` is optional for backward compatibility
+    with pre-v6 callers — when absent, calibration is not consulted.
+    """
+    return _resolve_metric(
+        channel_id=channel_id, metric="cpm_twd",
+        client_id=client_id, target_id=target_id, owner_id=owner_id,
+        brief_override=brief_override,
+        static_default=default_channel_cpm(channel_id),
+    )
+
+
+def resolve_channel_penetration(*, channel_id: str, client_id: Optional[str],
+                                target_id: Optional[str],
+                                owner_id: Optional[str] = None,
+                                brief_override: Optional[float] = None) -> float:
+    """Sibling of :func:`resolve_channel_cpm` for the penetration metric.
+    Same resolution order."""
+    return _resolve_metric(
+        channel_id=channel_id, metric="penetration_pct",
+        client_id=client_id, target_id=target_id, owner_id=owner_id,
+        brief_override=brief_override,
+        static_default=default_channel_penetration(channel_id),
+    )
 
 
 # ---------- helpers ----------
@@ -107,11 +153,18 @@ def _target_universe(target_ids: List[str]) -> int:
 def compute_manual_plan(
     brief: Brief,
     manual_input: ManualPlanInput,
+    *,
+    owner_id: Optional[str] = None,
 ) -> Plan:
     metrics = reference.channel_metrics()
     universe_000 = _target_universe(brief.target_ids)
     start = brief.start_date
     allocations: List[ChannelAllocation] = []
+
+    # Resolve once per plan: first_target_id acts as the calibration key
+    # (matches calibration.record_from_actuals fan-out semantics).
+    client_id = brief.client_id
+    target_id = (brief.target_ids or [None])[0] if brief.target_ids else None
 
     for channel_id in brief.channel_ids:
         weekly_budgets = manual_input.weekly_budgets.get(channel_id, [0.0] * brief.weeks)
@@ -120,11 +173,23 @@ def compute_manual_plan(
         if not m:
             continue
 
+        ov = _override_for(brief, channel_id)
+        cpm = resolve_channel_cpm(
+            channel_id=channel_id, client_id=client_id, target_id=target_id,
+            owner_id=owner_id,
+            brief_override=ov.cpm_twd if ov else None,
+        )
+        penetration = resolve_channel_penetration(
+            channel_id=channel_id, client_id=client_id, target_id=target_id,
+            owner_id=owner_id,
+            brief_override=ov.penetration_pct if ov else None,
+        )
+
         week_rows: List[WeekAllocation] = []
         channel_total = 0.0
         channel_imp = 0
         for i, budget in enumerate(weekly_budgets):
-            imp = _impressions_from_budget(budget, m.cpm_twd)
+            imp = _impressions_from_budget(budget, cpm)
             grp = _grp_from_impressions(imp, universe_000)
             week_rows.append(
                 WeekAllocation(
@@ -144,7 +209,11 @@ def compute_manual_plan(
                 w.share_pct = round(w.budget_twd / channel_total * 100, 2)
 
         channel_grp = _grp_from_impressions(channel_imp, universe_000)
-        channel_reach = _reach_curve(channel_grp, m.penetration_pct)
+        channel_reach = _reach_curve(channel_grp, penetration)
+        # If the planner overrode net_reach_pct directly, trust their number
+        # verbatim — it's a downstream summary metric, not a curve input.
+        if ov and ov.net_reach_pct is not None:
+            channel_reach = float(ov.net_reach_pct)
         freq = round(channel_grp / channel_reach, 2) if channel_reach else 0.0
 
         allocations.append(
@@ -199,6 +268,8 @@ def _apply_constraints(
 def compute_automatic_plan(
     brief: Brief,
     automatic_input: AutomaticPlanInput,
+    *,
+    owner_id: Optional[str] = None,
 ) -> Plan:
     pool = list(dict.fromkeys(
         automatic_input.mandatory_channel_ids + automatic_input.optional_channel_ids
@@ -235,16 +306,31 @@ def compute_automatic_plan(
     metrics = reference.channel_metrics()
     allocations: List[ChannelAllocation] = []
 
+    client_id = brief.client_id
+    target_id = (brief.target_ids or [None])[0] if brief.target_ids else None
+
     for ch in pool:
         ch_budget = round(alloc.get(ch, 0.0), 2)
         m = metrics.get(ch)
         if not m:
             continue
+        ov = _override_for(brief, ch)
+        cpm = resolve_channel_cpm(
+            channel_id=ch, client_id=client_id, target_id=target_id,
+            owner_id=owner_id,
+            brief_override=ov.cpm_twd if ov else None,
+        )
+        penetration = resolve_channel_penetration(
+            channel_id=ch, client_id=client_id, target_id=target_id,
+            owner_id=owner_id,
+            brief_override=ov.penetration_pct if ov else None,
+        )
+
         per_week = ch_budget / brief.weeks if brief.weeks else 0.0
         week_rows: List[WeekAllocation] = []
         imp_total = 0
         for i in range(brief.weeks):
-            imp = _impressions_from_budget(per_week, m.cpm_twd)
+            imp = _impressions_from_budget(per_week, cpm)
             grp = _grp_from_impressions(imp, universe_000)
             week_rows.append(
                 WeekAllocation(
@@ -259,7 +345,9 @@ def compute_automatic_plan(
             imp_total += imp
 
         ch_grp = _grp_from_impressions(imp_total, universe_000)
-        ch_reach = _reach_curve(ch_grp, m.penetration_pct)
+        ch_reach = _reach_curve(ch_grp, penetration)
+        if ov and ov.net_reach_pct is not None:
+            ch_reach = float(ov.net_reach_pct)
         freq = round(ch_grp / ch_reach, 2) if ch_reach else 0.0
         allocations.append(
             ChannelAllocation(
