@@ -1606,6 +1606,373 @@ async function bootApp() {
   renderProjects();
 }
 
+/* ========================================================================
+ * v6 · Actuals capture, report & recommend-fill banner (PRD v6 · FR-27..33)
+ * ====================================================================== */
+
+const RECOMMEND_FILL_BANNER = {
+  headline: "填好這兩項，之後預估會越來越準",
+  body:
+    "精準的成效推估，建議一定要填：Channel Calibration 與 Penetration Adjustment。" +
+    "填完後系統會記住你這家 client × target 的實際表現，之後預估會越來越準。",
+  cta: "立即填寫",
+};
+
+/* Called from renderChannels (CHANNELS step). Shows a sticky yellow
+ * banner when `(client_id × target_id)` has no prior actuals. Dismissing
+ * is session-local only. */
+async function maybeShowRecommendFillBanner(card) {
+  const b = state.session?.brief;
+  if (!b?.client_id || !(b.target_ids || []).length) return;
+  if (state.bannerDismissed) return;
+  const target = b.target_ids[0];
+  try {
+    const r = await apiFetch(
+      `/api/calibration/coverage?client_id=${encodeURIComponent(b.client_id)}` +
+      `&target_id=${encodeURIComponent(target)}`
+    );
+    const body = await r.json();
+    if (body.has_history) return;
+  } catch (_) { return; }
+
+  const banner = el("div", {
+    class: "card",
+    style: "background:#FFFBEB;border:1px solid #F59E0B;margin:8px 0;padding:10px 12px",
+  });
+  banner.append(
+    el("div", { style: "font-weight:700;color:#92400E;margin-bottom:4px" },
+       RECOMMEND_FILL_BANNER.headline),
+    el("div", { style: "font-size:13px;color:#7C2D12;margin-bottom:6px" },
+       RECOMMEND_FILL_BANNER.body),
+    el("div", { style: "display:flex;gap:8px" },
+      el("button", {
+        style: "padding:6px 12px;border-radius:999px;border:0;background:#F59E0B;color:#fff;cursor:pointer",
+        onclick: () => { alert("此版本請先完成 Brief，並在 Plan 完成後於 Project Detail 點 '📊 記錄成效'。"); },
+      }, RECOMMEND_FILL_BANNER.cta),
+      el("button", {
+        style: "padding:6px 12px;border-radius:999px;border:1px solid #E5E7EB;background:#fff;cursor:pointer",
+        onclick: () => { state.bannerDismissed = true; banner.remove(); },
+      }, "本次先跳過"),
+    ),
+  );
+  card.parentNode?.insertBefore(banner, card);
+}
+
+/* ---------- Actuals modal ---------- */
+
+function _actualsCellInputs(prefix, initial) {
+  const fields = [
+    ["spend_twd", "花費 (TWD)"],
+    ["impressions", "Impressions"],
+    ["cpm_twd", "CPM"],
+    ["net_reach_pct", "Net Reach %"],
+    ["frequency", "Frequency"],
+    ["penetration_pct", "Penetration %"],
+    ["buying_audience_000", "Buying Audience (千人)"],
+  ];
+  const row = el("div", { style: "display:grid;grid-template-columns:repeat(7,minmax(80px,1fr));gap:6px" });
+  const inputs = {};
+  fields.forEach(([k, label]) => {
+    const id = `${prefix}-${k}`;
+    const input = el("input", {
+      id, type: "number", step: "any",
+      value: initial && initial[k] != null ? String(initial[k]) : "",
+      style: "width:100%;padding:3px 6px;border:1px solid #E5E7EB;border-radius:6px;font-size:12px",
+    });
+    inputs[k] = input;
+    row.append(el("div", {},
+      el("div", { style: "font-size:10px;color:#6B7280" }, label),
+      input));
+  });
+  return { row, inputs };
+}
+
+async function openActualsModal(plan) {
+  const existing = await apiFetch(`/api/plans/${plan.id}/actuals`).then(r => r.json());
+  const byWeek = {};
+  let finalRec = null;
+  existing.forEach(rec => {
+    if (rec.scope === "FINAL") finalRec = rec;
+    else if (rec.scope === "WEEKLY" && rec.period_week) byWeek[rec.period_week] = rec;
+  });
+
+  const overlay = el("div", {
+    style: "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;" +
+           "display:flex;align-items:center;justify-content:center",
+  });
+  const modal = el("div", {
+    style: "background:#fff;border-radius:12px;padding:20px;width:min(980px,92vw);" +
+           "max-height:88vh;overflow:auto",
+  });
+
+  modal.append(
+    el("div", { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px" },
+      el("h3", { style: "margin:0" }, `📊 記錄成效 · ${plan.name}`),
+      el("button", {
+        style: "border:0;background:#F3F4F6;padding:4px 10px;border-radius:999px;cursor:pointer",
+        onclick: () => overlay.remove(),
+      }, "✕"))
+  );
+
+  // Tab switcher
+  const tabWeekly = el("button", {
+    style: "padding:6px 14px;border:0;border-radius:999px;background:#111827;color:#fff;cursor:pointer",
+  }, "週週補");
+  const tabFinal = el("button", {
+    style: "padding:6px 14px;border:0;border-radius:999px;background:#F3F4F6;color:#111827;cursor:pointer",
+  }, "最終結算");
+  const tabs = el("div", { style: "display:flex;gap:8px;margin-bottom:10px" }, tabWeekly, tabFinal);
+  modal.append(tabs);
+
+  const weeklyView = el("div", {});
+  const finalView = el("div", { style: "display:none" });
+
+  // Weekly view — one row per channel × week, grouped by week
+  const channels = plan.allocations.map(a => a.channel_id);
+  const weekCount = plan.allocations[0]?.weeks?.length || 4;
+  const weeklyInputs = {};  // weeklyInputs[week][ch] = {inputs:{...}}
+  for (let w = 1; w <= weekCount; w++) {
+    weeklyInputs[w] = {};
+    const block = el("details", { ...(byWeek[w] ? { open: "" } : {}), style: "border:1px solid #E5E7EB;border-radius:8px;padding:8px;margin-bottom:8px" });
+    block.append(el("summary", { style: "font-weight:600;cursor:pointer" }, `Week ${w}`));
+    channels.forEach(ch => {
+      const init = byWeek[w]?.per_channel?.[ch];
+      const { row, inputs } = _actualsCellInputs(`w${w}-${ch}`, init);
+      weeklyInputs[w][ch] = inputs;
+      block.append(
+        el("div", { style: "margin-top:6px;font-size:12px;color:#374151" }, ch),
+        row
+      );
+    });
+    weeklyView.append(block);
+  }
+
+  // Final view
+  const finalInputs = {};
+  channels.forEach(ch => {
+    const init = finalRec?.per_channel?.[ch];
+    const { row, inputs } = _actualsCellInputs(`final-${ch}`, init);
+    finalInputs[ch] = inputs;
+    finalView.append(
+      el("div", { style: "margin-top:6px;font-size:13px;color:#111827;font-weight:600" }, ch),
+      row
+    );
+  });
+  const aggregateBtn = el("button", {
+    style: "margin-top:12px;padding:8px 14px;border:1px solid #8B5CF6;background:#fff;color:#8B5CF6;border-radius:999px;cursor:pointer",
+    onclick: () => {
+      // Aggregate weekly → suggest final
+      channels.forEach(ch => {
+        let sumSpend = 0, sumImpr = 0, cntCpm = 0, cpmAcc = 0, reachAcc = 0, penAcc = 0, cntRatio = 0;
+        for (let w = 1; w <= weekCount; w++) {
+          const ins = weeklyInputs[w][ch];
+          const sp = Number(ins.spend_twd.value || 0);
+          const im = Number(ins.impressions.value || 0);
+          const cpm = Number(ins.cpm_twd.value || 0);
+          const reach = Number(ins.net_reach_pct.value || 0);
+          const pen = Number(ins.penetration_pct.value || 0);
+          if (sp || im) { sumSpend += sp; sumImpr += im; }
+          if (cpm) { cpmAcc += cpm; cntCpm++; }
+          if (reach || pen) { reachAcc += reach; penAcc += pen; cntRatio++; }
+        }
+        finalInputs[ch].spend_twd.value = sumSpend.toFixed(0);
+        finalInputs[ch].impressions.value = sumImpr.toFixed(0);
+        finalInputs[ch].cpm_twd.value = cntCpm ? (cpmAcc / cntCpm).toFixed(2) : (sumImpr ? (sumSpend / sumImpr * 1000).toFixed(2) : "");
+        finalInputs[ch].net_reach_pct.value = cntRatio ? (reachAcc / cntRatio).toFixed(2) : "";
+        finalInputs[ch].penetration_pct.value = cntRatio ? (penAcc / cntRatio).toFixed(2) : "";
+      });
+      botSay("已依週數據試算最終結算，請檢查後再存。");
+    },
+  }, "用週數據試算最終結算");
+  finalView.append(aggregateBtn);
+
+  modal.append(weeklyView, finalView);
+
+  tabWeekly.onclick = () => {
+    weeklyView.style.display = "";
+    finalView.style.display = "none";
+    tabWeekly.style.background = "#111827"; tabWeekly.style.color = "#fff";
+    tabFinal.style.background = "#F3F4F6"; tabFinal.style.color = "#111827";
+  };
+  tabFinal.onclick = () => {
+    weeklyView.style.display = "none";
+    finalView.style.display = "";
+    tabFinal.style.background = "#111827"; tabFinal.style.color = "#fff";
+    tabWeekly.style.background = "#F3F4F6"; tabWeekly.style.color = "#111827";
+  };
+
+  // Notes
+  const notesInput = el("textarea", {
+    placeholder: "Notes (選填)",
+    style: "width:100%;margin-top:10px;padding:6px;border:1px solid #E5E7EB;border-radius:6px;min-height:60px",
+  });
+  if (finalRec?.notes) notesInput.value = finalRec.notes;
+  modal.append(el("div", { style: "margin-top:12px" },
+    el("div", { style: "font-size:12px;color:#374151;margin-bottom:4px" }, "備註"),
+    notesInput));
+
+  // Save + Cancel
+  const saveBtn = el("button", {
+    style: "margin-top:14px;padding:8px 18px;border:0;background:#10B981;color:#fff;border-radius:999px;cursor:pointer;font-weight:600",
+    onclick: async () => {
+      const records = [];
+      // Weekly records — only ones with any non-empty field
+      for (let w = 1; w <= weekCount; w++) {
+        const perCh = {};
+        let touched = false;
+        channels.forEach(ch => {
+          const ins = weeklyInputs[w][ch];
+          const vals = {};
+          let any = false;
+          Object.keys(ins).forEach(k => {
+            const v = ins[k].value;
+            if (v !== "") { vals[k] = Number(v); any = true; }
+          });
+          if (any) { perCh[ch] = vals; touched = true; }
+        });
+        if (touched) {
+          records.push({ scope: "WEEKLY", period_week: w, per_channel: perCh });
+        }
+      }
+      // Final record — only if any field filled
+      const finalPerCh = {};
+      let finalTouched = false;
+      channels.forEach(ch => {
+        const ins = finalInputs[ch];
+        const vals = {};
+        let any = false;
+        Object.keys(ins).forEach(k => {
+          const v = ins[k].value;
+          if (v !== "") { vals[k] = Number(v); any = true; }
+        });
+        if (any) { finalPerCh[ch] = vals; finalTouched = true; }
+      });
+      if (finalTouched) {
+        records.push({
+          scope: "FINAL", period_week: null, per_channel: finalPerCh,
+          notes: notesInput.value || null,
+        });
+      }
+      if (!records.length) { alert("沒有任何資料可儲存。"); return; }
+      try {
+        await apiFetch(`/api/plans/${plan.id}/actuals`, {
+          method: "PUT",
+          body: JSON.stringify({ records }),
+        });
+        overlay.remove();
+        botSay(`✅ 已儲存 ${records.length} 筆 actuals for ${escapeHTML(plan.name)}.`);
+      } catch (e) { showError(e); }
+    },
+  }, "儲存");
+  const cancelBtn = el("button", {
+    style: "margin-left:8px;padding:8px 18px;border:1px solid #E5E7EB;background:#fff;border-radius:999px;cursor:pointer",
+    onclick: () => overlay.remove(),
+  }, "取消");
+  modal.append(el("div", { style: "margin-top:10px" }, saveBtn, cancelBtn));
+
+  overlay.append(modal);
+  document.body.append(overlay);
+}
+
+/* ---------- Reports view ---------- */
+
+async function renderPlanReport(plan) {
+  scroll.innerHTML = "";
+  const msg = botSay(`📈 成效回顧 · ${escapeHTML(plan.name)}`);
+  const card = el("div", { class: "card compare-view full" });
+  try {
+    const report = await apiFetch(`/api/plans/${plan.id}/report`).then(r => r.json());
+    if (report.status === "no_actuals") {
+      card.append(
+        el("div", { style: "color:#6B7280;padding:12px" },
+          "尚未記錄 actuals。點 📊 記錄成效 先把這個 plan 的實際數值存下來。"),
+        el("button", {
+          style: "padding:6px 14px;border:0;background:#10B981;color:#fff;border-radius:999px;cursor:pointer",
+          onclick: () => openActualsModal(plan),
+        }, "📊 記錄成效"),
+      );
+    } else {
+      card.append(el("div", { style: "margin-bottom:8px;color:#6B7280" },
+        `Source: ${escapeHTML(report.source)}`));
+      const tbl = el("table", { class: "tbl" });
+      tbl.append(el("thead", {}, el("tr", {},
+        el("th", {}, "Channel"),
+        el("th", { class: "num" }, "Planned Spend"),
+        el("th", { class: "num" }, "Actual Spend"),
+        el("th", { class: "num" }, "Variance"),
+        el("th", { class: "num" }, "Δ Reach"),
+      )));
+      const tbody = el("tbody", {});
+      report.per_channel.forEach(r => {
+        const bg = r.spend_badge === "red" ? "#f8d7da"
+                 : r.spend_badge === "amber" ? "#fff3cd" : "#d4edda";
+        tbody.append(el("tr", {},
+          el("td", {}, r.channel_id),
+          el("td", { class: "num" }, Math.round(r.planned_spend_twd).toLocaleString()),
+          el("td", { class: "num" }, Math.round(r.actual_spend_twd).toLocaleString()),
+          el("td", { class: "num", style: `background:${bg}` },
+             (r.spend_variance_pct >= 0 ? "+" : "") + r.spend_variance_pct.toFixed(1) + "%"),
+          el("td", { class: "num" },
+             (r.net_reach_delta_pp >= 0 ? "+" : "") + r.net_reach_delta_pp.toFixed(1) + "pp"),
+        ));
+      });
+      tbl.append(tbody);
+      card.append(tbl);
+      const agg = report.aggregate;
+      if (agg) {
+        card.append(el("div", {
+          style: "margin-top:10px;padding:10px;background:#F6F8FA;border-radius:8px",
+        },
+          el("div", {}, `Total Actual Spend: ${Math.round(agg.actual_spend_twd).toLocaleString()}`),
+          el("div", {}, `Spend Variance: ${(agg.spend_variance_pct >= 0 ? "+" : "") + agg.spend_variance_pct.toFixed(1)}%`),
+          el("div", {}, `Net Reach Δ: ${(agg.net_reach_delta_pp >= 0 ? "+" : "") + agg.net_reach_delta_pp.toFixed(1)}pp`),
+        ));
+      }
+      card.append(el("div", { style: "margin-top:10px" },
+        el("a", {
+          href: `/api/plans/${plan.id}/report.html`, target: "_blank",
+          style: "padding:6px 14px;border:1px solid #111827;color:#111827;background:#fff;border-radius:999px;text-decoration:none;display:inline-block",
+        }, "🖨 開啟列印用 report.html")));
+    }
+  } catch (e) { showError(e); }
+  msg.append(card);
+}
+
+/* ---------- renderChannels injection: call banner helper ---------- */
+const _origRenderChannels = renderChannels;
+renderChannels = function(msg) {
+  _origRenderChannels(msg);
+  const card = msg.querySelector(".card");
+  if (card) maybeShowRecommendFillBanner(card);
+};
+
+/* ---------- renderProjectDetail injection: per-plan actuals + reports buttons ---------- */
+const _origRenderProjectDetail = renderProjectDetail;
+renderProjectDetail = async function(projectId) {
+  await _origRenderProjectDetail(projectId);
+  // Inject action buttons next to every plan row's budget column.
+  const planRows = scroll.querySelectorAll("table.tbl tbody tr");
+  const plans = await api.projectPlans(projectId);
+  planRows.forEach((tr, idx) => {
+    // We target plan tables by their header match; skip session tables.
+    const firstHeader = tr.parentElement?.previousElementSibling?.querySelector("th")?.textContent || "";
+    if (firstHeader !== "Plan") return;
+    const plan = plans[idx];
+    if (!plan) return;
+    const actionsTd = el("td", { style: "white-space:nowrap" },
+      el("button", {
+        style: "padding:3px 8px;margin-right:4px;border-radius:999px;border:1px solid #10B981;background:#fff;color:#10B981;cursor:pointer;font-size:12px",
+        onclick: () => openActualsModal(plan),
+      }, "📊 記錄成效"),
+      el("button", {
+        style: "padding:3px 8px;border-radius:999px;border:1px solid #111827;background:#fff;color:#111827;cursor:pointer;font-size:12px",
+        onclick: () => renderPlanReport(plan),
+      }, "📈 成效回顧"),
+    );
+    tr.append(actionsTd);
+  });
+};
+
 /* Install #navHome click (delegated) */
 document.addEventListener("click", (e) => {
   const t = e.target;
