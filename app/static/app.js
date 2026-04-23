@@ -3232,19 +3232,17 @@ async function renderPlanDashboard(plan, container) {
 
   const charts = {};
 
-  // The existing drawXxxChart(Chart, canvas, payload) helpers call
-  // `new Chart(canvas, cfg)` internally but don't return the instance.
-  // We monkey-patch Chart briefly to capture it — only the local
-  // reference, so we don't affect any other concurrent caller.
-  const capture = (fn) => (ChartCls, canvas, p) => {
-    let inst;
-    const OriginalChart = window.Chart;
-    window.Chart = class extends OriginalChart {
-      constructor(c, cfg) { super(c, cfg); inst = this; }
+  // The drawXxxChart(Chart, canvas, payload) helpers construct the
+  // chart via `new Chart(canvas, cfg)` using their FIRST argument.
+  // We pass a tiny capturing subclass that extends the actually-loaded
+  // Chart (the local `Chart` variable from loadChartLib() — Chart.js
+  // ESM does NOT populate window.Chart, so extending window.Chart
+  // would throw TypeError at runtime).
+  function _makeCapturingChart(key) {
+    return class extends Chart {
+      constructor(c, cfg) { super(c, cfg); charts[key] = this; }
     };
-    try { fn(window.Chart, canvas, p); } finally { window.Chart = OriginalChart; }
-    return inst;
-  };
+  }
 
   function _chartCard(title, canvasId, drawFn, filenameSuffix) {
     const canvasWrap = el("div", { style:
@@ -3252,20 +3250,22 @@ async function renderPlanDashboard(plan, container) {
     canvasWrap.append(el("h6", { style: "margin:0 0 6px;color:#111827" }, title));
     const canvas = el("canvas", { id: canvasId, style: "width:100%;height:220px" });
     canvasWrap.append(canvas);
-    const chart = drawFn(Chart, canvas, payload);
-    charts[filenameSuffix] = chart;
-    _attachChartPngDownload(canvasWrap, chart, `${plan.name}_${filenameSuffix}`);
+    drawFn(_makeCapturingChart(filenameSuffix), canvas, payload);
+    const chart = charts[filenameSuffix];
+    if (chart) {
+      _attachChartPngDownload(canvasWrap, chart, `${plan.name}_${filenameSuffix}`);
+    }
     section.append(canvasWrap);
   }
 
   _chartCard("Summary · 核心指標", "rev-summary-" + plan.id,
-             capture(drawSummaryChart), "summary");
+             drawSummaryChart, "summary");
   _chartCard("Budget · Channel 分配", "rev-budget-" + plan.id,
-             capture(drawBudgetChart), "budget");
+             drawBudgetChart, "budget");
   _chartCard("Frequency Distribution · 有效觸及", "rev-freq-" + plan.id,
-             capture(drawFrequencyChart), "frequency");
+             drawFrequencyChart, "frequency");
   _chartCard("Weekly GRP · 每週 GRP", "rev-weekly-" + plan.id,
-             capture(drawWeeklyChart), "weekly");
+             drawWeeklyChart, "weekly");
 
   container.appendChild(section);
   return { charts, payload, section };
@@ -3832,56 +3832,103 @@ renderPlanReport = async function(plan) {
   });
 };
 
-/* Wire the Compare view: capture Chart instances as they're drawn,
- * then inject a 📦 bundle button into the comparison card. */
-const _origRenderCompareV71 = renderCompare;
-renderCompare = async function(planIds) {
-  // Monkey-patch the Chart constructor briefly so every draw in the base
-  // renderCompare() records its instance, keyed by the canvas id suffix.
-  const captured = {};
-  const OriginalChart = window.Chart;
-  if (OriginalChart) {
-    window.Chart = class extends OriginalChart {
-      constructor(canvas, cfg) {
-        super(canvas, cfg);
-        // canvas.id looks like "chart-summary", "chart-weekly", etc.
-        const id = canvas && canvas.id ? canvas.id.replace(/^chart-/, "") : "";
-        if (id) captured[id] = this;
-      }
-    };
-  }
+/* ---------- Compare-view bundle: offscreen render on demand ----------
+ * The previous attempt monkey-patched window.Chart to capture instances
+ * drawn by the base renderer. That failed because Chart.js ESM import
+ * stores the class in the module-local `_chartLib` — window.Chart is
+ * never assigned, so the `if (OriginalChart)` guard skipped capture
+ * entirely and the bundle button always saw an empty charts dict.
+ *
+ * Fix: don't touch the base renderer. When the user clicks 📦 we:
+ *   1. Fetch the augmented /compare payload (same one the base rendered).
+ *   2. Render the 5 charts offscreen (position:absolute; left:-9999px)
+ *      using a CapturingChart subclass of the LOADED Chart reference.
+ *   3. Wait a frame for Chart.js to finish drawing.
+ *   4. Hand the instances to bundleCompareZip(). Remove the offscreen DOM.
+ *
+ * This is slightly slower (pay for 5 extra chart renders on click) but
+ * is correct and doesn't need any coordination with the base renderer. */
+async function _bundleCompareFromPlanIds(planIds, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "產生中..."; }
   try {
-    await _origRenderCompareV71(planIds);
-  } finally {
-    window.Chart = OriginalChart;
-  }
-
-  // Fetch the payload again so we have it for the bundle — cheaper than
-  // refactoring the base renderer to expose it.
-  let payload = null;
-  try {
+    const Chart = await loadChartLib();
+    if (!Chart) {
+      alert("⚠️ 無法載入 Chart.js (離線或 CDN 被擋)。請改用每張圖右下角的 📥 PNG 分別下載。");
+      return;
+    }
     const r = await apiFetch("/api/plans/compare", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(planIds),
     });
-    if (r.ok) payload = await r.json();
-  } catch (_) { /* bundle button will be disabled */ }
-  if (!payload) return;
+    if (!r.ok) { showError(new Error(await r.text())); return; }
+    const payload = await r.json();
 
-  // Inject a bundle button below the last rendered comparison bubble.
+    // Build offscreen host + 5 canvases for the compare chart family.
+    const host = el("div", {
+      style: "position:absolute;left:-9999px;top:0;width:640px;pointer-events:none"
+    });
+    const canvases = {
+      summary:   el("canvas", { style: "width:640px;height:360px" }),
+      budget:    el("canvas", { style: "width:640px;height:360px" }),
+      reach:     el("canvas", { style: "width:640px;height:360px" }),
+      frequency: el("canvas", { style: "width:640px;height:360px" }),
+      weekly:    el("canvas", { style: "width:640px;height:360px" }),
+    };
+    Object.values(canvases).forEach(c => host.append(c));
+    document.body.append(host);
+
+    // Capturing subclass — extends the actually-loaded Chart reference,
+    // NOT window.Chart (which the ESM loader never populates).
+    const captured = {};
+    class CapturingChart extends Chart {
+      constructor(canvas, cfg) {
+        super(canvas, cfg);
+        const key = Object.keys(canvases).find(k => canvases[k] === canvas);
+        if (key) captured[key] = this;
+      }
+    }
+
+    try {
+      drawSummaryChart(CapturingChart,   canvases.summary,   payload);
+      drawBudgetChart(CapturingChart,    canvases.budget,    payload);
+      drawReachChart(CapturingChart,     canvases.reach,     payload);
+      drawFrequencyChart(CapturingChart, canvases.frequency, payload);
+      drawWeeklyChart(CapturingChart,    canvases.weekly,    payload);
+      // Give Chart.js a frame to finish any deferred drawing so
+      // toBase64Image() captures a complete image.
+      await new Promise(r => requestAnimationFrame(() =>
+        requestAnimationFrame(r)));
+      await bundleCompareZip(payload, captured);
+    } finally {
+      host.remove();
+    }
+  } catch (e) {
+    showError(e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "📦 一鍵打包下載 (ZIP)"; }
+  }
+}
+
+const _origRenderCompareV71 = renderCompare;
+renderCompare = async function(planIds) {
+  // Base renderer does all the visible work untouched.
+  await _origRenderCompareV71(planIds);
+
   const msgNode = scroll.querySelector(".bubble.bot:last-child .msg");
   if (!msgNode) return;
+
+  const btn = el("button", {
+    style: "padding:8px 18px;border:0;background:#111827;color:#fff;" +
+           "border-radius:999px;cursor:pointer;font-weight:600",
+  }, "📦 一鍵打包下載 (ZIP)");
+  btn.addEventListener("click", () => _bundleCompareFromPlanIds(planIds, btn));
 
   const bundleCard = el("div", { class: "card", style: "margin-top:10px" });
   bundleCard.append(
     el("h5", { style: "margin-bottom:4px" }, "📦 打包下載比較結果"),
     el("div", { style: "color:#6B7280;font-size:12px;margin-bottom:8px" },
       "產出 ZIP：含 HTML 報告、每張圖 PNG、原始 plan 資料 + README。"),
-    el("button", {
-      style: "padding:8px 18px;border:0;background:#111827;color:#fff;" +
-             "border-radius:999px;cursor:pointer;font-weight:600",
-      onclick: () => bundleCompareZip(payload, captured),
-    }, "📦 一鍵打包下載 (ZIP)"),
+    btn,
   );
   msgNode.append(bundleCard);
 };
