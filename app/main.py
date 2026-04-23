@@ -633,6 +633,27 @@ def calibration_channel_summary(client_id: str, target_id: str,
     return out
 
 
+def _augment_plan(plan) -> dict:
+    """Plan JSON + derived stats used by both Compare (≥2 plans) and the
+    single-plan Review dashboard."""
+    d = plan.model_dump()
+    d["frequency_distribution"] = optimizer.frequency_distribution(plan)
+    d["duplication"]            = optimizer.duplication_matrix(plan)
+    d["weekly_grp"]             = optimizer.weekly_grp(plan)
+    return d
+
+
+@app.get("/api/plans/{plan_id}/augmented")
+def get_plan_augmented(plan_id: str, user: User = Depends(current_user)):
+    """Single-plan equivalent of the Compare response item — used by the
+    Review dashboard so the planner sees the same chart family after
+    finishing ONE plan, without needing a second plan to compare."""
+    plan = storage.get_plan(plan_id, owner_id=user.id)
+    if not plan:
+        raise HTTPException(404, f"Plan '{plan_id}' not found.")
+    return _augment_plan(plan)
+
+
 @app.post("/api/plans/compare")
 def compare_plans(plan_ids: List[str], user: User = Depends(current_user)):
     plans = [storage.get_plan(p, owner_id=user.id) for p in plan_ids]
@@ -640,15 +661,8 @@ def compare_plans(plan_ids: List[str], user: User = Depends(current_user)):
     if len(plans) < 2:
         raise HTTPException(400, "Need at least 2 valid plan ids to compare.")
 
-    def _augment(plan) -> dict:
-        d = plan.model_dump()
-        d["frequency_distribution"] = optimizer.frequency_distribution(plan)
-        d["duplication"]            = optimizer.duplication_matrix(plan)
-        d["weekly_grp"]             = optimizer.weekly_grp(plan)
-        return d
-
     return {
-        "plans": [_augment(p) for p in plans],
+        "plans": [_augment_plan(p) for p in plans],
         "delta": {
             "total_budget_twd":  plans[1].summary.total_budget_twd  - plans[0].summary.total_budget_twd,
             "net_reach_pct":     plans[1].summary.net_reach_pct     - plans[0].summary.net_reach_pct,
