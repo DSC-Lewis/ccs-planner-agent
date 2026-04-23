@@ -3458,4 +3458,432 @@ renderPlanReport = async function(plan) {
   })();
 };
 
+/* ========================================================================
+ * v7.1 · One-click ZIP bundle — single-plan + Compare
+ * ====================================================================== */
+
+/** Lazy-load JSZip from jsDelivr (ESM build). Same pattern as
+ *  loadChartLib: cached on window, returns null on failure so callers
+ *  can gracefully fall back. */
+async function loadZipLib() {
+  if (window._zipLib !== undefined) return window._zipLib;
+  try {
+    const mod = await import("https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm");
+    window._zipLib = mod.default || mod.JSZip || mod;
+    return window._zipLib;
+  } catch (e) {
+    console.warn("JSZip load failed", e);
+    window._zipLib = null;
+    return null;
+  }
+}
+
+/** Shared helper — pull the PNG bytes out of a Chart.js instance.
+ *  Returns ``{bytes: Uint8Array, base64: string}`` or ``null``. */
+function _chartPngBytes(chart) {
+  try {
+    const dataUrl = chart.toBase64Image("image/png", 1.0);
+    const b64 = dataUrl.split(",")[1];
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { bytes, base64: b64 };
+  } catch (_) { return null; }
+}
+
+function _safeFileName(s) {
+  return String(s || "plan").replace(/[^\w\-一-龥]/g, "_").slice(0, 60);
+}
+
+/** Build a ZIP bundle for a single completed plan. Includes:
+ *    report.html   self-contained HTML (same format as the old export)
+ *    charts/*.png  each dashboard chart as a standalone PNG
+ *    data/plan.json       raw plan record (summary + allocations)
+ *    data/augmented.json  frequency_distribution + duplication + weekly_grp
+ *    README.txt    short guide
+ *  Falls back to exportPlanReport() if JSZip fails to load.
+ */
+async function bundlePlanZip(plan, dashboard) {
+  const JSZip = await loadZipLib();
+  if (!JSZip) {
+    exportPlanReport(plan, dashboard);  // PR #13 fallback
+    return;
+  }
+  if (!dashboard || !dashboard.charts) {
+    alert("圖表還在載入，請稍候再試。");
+    return;
+  }
+
+  const zip = new JSZip();
+
+  // HTML report — re-use the same buildPlanHtml logic by intercepting
+  // the download trigger. Simpler: inline the HTML builder used by
+  // exportPlanReport — extracted into _buildPlanReportHtml for DRY.
+  zip.file("report.html", _buildPlanReportHtml(plan, dashboard));
+
+  // Per-chart PNGs
+  const charts = zip.folder("charts");
+  Object.entries(dashboard.charts).forEach(([name, chart]) => {
+    const out = _chartPngBytes(chart);
+    if (out) charts.file(`${name}.png`, out.base64, { base64: true });
+  });
+
+  // Raw data — plan.json for the record, augmented.json for derived stats.
+  const data = zip.folder("data");
+  data.file("plan.json", JSON.stringify(plan, null, 2));
+  if (dashboard.payload && dashboard.payload.plans && dashboard.payload.plans[0]) {
+    const aug = { ...dashboard.payload.plans[0] };
+    // plan data already duplicates in report.html; extract just the derived
+    // stats to keep augmented.json small and focused.
+    const augmented = {
+      frequency_distribution: aug.frequency_distribution,
+      duplication: aug.duplication,
+      weekly_grp: aug.weekly_grp,
+    };
+    data.file("augmented.json", JSON.stringify(augmented, null, 2));
+  }
+
+  zip.file("README.txt", _buildSingleReadme(plan));
+
+  const blob = await zip.generateAsync({ type: "blob" });
+  _triggerDownload(blob, `ccs-bundle-${_safeFileName(plan.name)}.zip`);
+}
+
+/** Build a ZIP bundle for a Compare view. Structure:
+ *    report.html        comparison report with both plans' charts
+ *    charts/*.png       every chart (5 for compare: summary, budget, reach, frequency, weekly)
+ *    data/plans.json    full augmented payload (both plans + delta)
+ *    data/plan-N.json   each plan's individual record
+ *    README.txt
+ */
+async function bundleCompareZip(payload, charts) {
+  const JSZip = await loadZipLib();
+  if (!JSZip) {
+    alert("⚠️ 無法載入 JSZip (離線或 CDN 被擋)。請改用每張圖右下角的 📥 PNG 分別下載。");
+    return;
+  }
+  if (!charts || !Object.keys(charts).length) {
+    alert("圖表還在載入，請稍候再試。");
+    return;
+  }
+
+  const zip = new JSZip();
+  zip.file("report.html", _buildCompareReportHtml(payload, charts));
+
+  const chartsFolder = zip.folder("charts");
+  Object.entries(charts).forEach(([name, chart]) => {
+    const out = _chartPngBytes(chart);
+    if (out) chartsFolder.file(`${name}.png`, out.base64, { base64: true });
+  });
+
+  const data = zip.folder("data");
+  data.file("plans.json", JSON.stringify(payload, null, 2));
+  (payload.plans || []).forEach((p, i) => {
+    data.file(`plan-${i + 1}.json`, JSON.stringify(p, null, 2));
+  });
+
+  zip.file("README.txt", _buildCompareReadme(payload));
+
+  const blob = await zip.generateAsync({ type: "blob" });
+  const names = (payload.plans || []).map(p => _safeFileName(p.name)).join("-vs-");
+  _triggerDownload(blob, `ccs-compare-${names || "plans"}.zip`);
+}
+
+/* ---------- HTML builders (used by both ZIP and HTML-only fallback) ---------- */
+
+function _buildPlanReportHtml(plan, dashboard) {
+  const images = {};
+  Object.entries(dashboard.charts).forEach(([k, c]) => {
+    const out = _chartPngBytes(c);
+    images[k] = out ? `data:image/png;base64,${out.base64}` : null;
+  });
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const allocRows = (plan.allocations || []).map(a => `
+    <tr>
+      <td>${esc(a.channel_id)}</td>
+      <td class="num">${(a.total_budget_twd || 0).toLocaleString()}</td>
+      <td class="num">${(a.total_impressions || 0).toLocaleString()}</td>
+      <td class="num">${a.total_grp || 0}</td>
+      <td class="num">${(a.net_reach_pct || 0).toFixed(2)}</td>
+      <td class="num">${(a.frequency || 0).toFixed(2)}</td>
+    </tr>`).join("");
+  const s = plan.summary || {};
+  const brief = (state && state.session && state.session.brief) || {};
+  const imgTag = (key, title) => images[key]
+    ? `<figure><figcaption>${esc(title)}</figcaption><img alt="${esc(title)}" src="${images[key]}"/></figure>`
+    : "";
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>CCS Plan Report · ${esc(plan.name || "Plan")}</title>
+<style>${_REPORT_CSS}</style></head><body>
+<h1>CCS Plan Report · ${esc(plan.name || "Plan")}</h1>
+<div class="meta">
+  Kind: ${esc(plan.kind || "")} ·
+  Client: ${esc(brief.client_id || "—")} ·
+  Target: ${esc((brief.target_ids || []).join(" / ") || "—")} ·
+  Weeks: ${esc(brief.weeks || "")} ·
+  Generated: ${new Date().toISOString().slice(0, 19).replace("T", " ")}
+</div>
+<section class="kpi">
+  <div class="kpi-cell"><span>Total Budget (TWD)</span><b>${(s.total_budget_twd || 0).toLocaleString()}</b></div>
+  <div class="kpi-cell"><span>Total Impressions</span><b>${(s.total_impressions || 0).toLocaleString()}</b></div>
+  <div class="kpi-cell"><span>Total GRP</span><b>${s.total_grp || 0}</b></div>
+  <div class="kpi-cell"><span>Net Reach %</span><b>${s.net_reach_pct || 0}</b></div>
+  <div class="kpi-cell"><span>Frequency</span><b>${s.frequency || 0}</b></div>
+</section>
+<h2>Channel Allocation</h2>
+<table>
+  <thead><tr><th>Channel</th><th class="num">Budget</th><th class="num">Impressions</th>
+    <th class="num">GRP</th><th class="num">Net Reach %</th><th class="num">Freq</th></tr></thead>
+  <tbody>${allocRows}</tbody>
+</table>
+<h2>Charts</h2>
+<div class="grid">
+  ${imgTag("summary",   "Summary · 核心指標")}
+  ${imgTag("budget",    "Budget · Channel 分配")}
+  ${imgTag("frequency", "Frequency Distribution · 有效觸及")}
+  ${imgTag("weekly",    "Weekly GRP · 每週 GRP")}
+</div>
+<p class="footer">Generated by CCS Planner Agent · self-contained export (offline-viewable).</p>
+</body></html>`;
+}
+
+function _buildCompareReportHtml(payload, charts) {
+  const images = {};
+  Object.entries(charts).forEach(([k, c]) => {
+    const out = _chartPngBytes(c);
+    images[k] = out ? `data:image/png;base64,${out.base64}` : null;
+  });
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const plans = payload.plans || [];
+  const delta = payload.delta || {};
+
+  const heroRows = plans.map(p => `
+    <tr>
+      <td>${esc(p.name)}</td>
+      <td class="num">${Math.round(p.summary.total_budget_twd || 0).toLocaleString()}</td>
+      <td class="num">${Math.round(p.summary.total_impressions || 0).toLocaleString()}</td>
+      <td class="num">${(p.summary.net_reach_pct || 0).toFixed(2)}</td>
+      <td class="num">${(p.summary.frequency || 0).toFixed(2)}</td>
+      <td class="num">${(p.summary.total_grp || 0).toFixed(2)}</td>
+    </tr>`).join("");
+
+  const planTables = plans.map((p, idx) => {
+    const allocRows = (p.allocations || []).map(a => `
+      <tr><td>${esc(a.channel_id)}</td>
+        <td class="num">${(a.total_budget_twd || 0).toLocaleString()}</td>
+        <td class="num">${(a.total_impressions || 0).toLocaleString()}</td>
+        <td class="num">${(a.net_reach_pct || 0).toFixed(2)}</td>
+        <td class="num">${(a.frequency || 0).toFixed(2)}</td></tr>`).join("");
+    return `<h3>Plan ${idx + 1} · ${esc(p.name)}</h3>
+<table>
+  <thead><tr><th>Channel</th><th class="num">Budget</th><th class="num">Impressions</th>
+    <th class="num">Net Reach %</th><th class="num">Freq</th></tr></thead>
+  <tbody>${allocRows}</tbody>
+</table>`;
+  }).join("");
+
+  const imgTag = (key, title) => images[key]
+    ? `<figure><figcaption>${esc(title)}</figcaption><img alt="${esc(title)}" src="${images[key]}"/></figure>`
+    : "";
+
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>CCS Plan Comparison · ${plans.map(p => esc(p.name)).join(" vs ")}</title>
+<style>${_REPORT_CSS}</style></head><body>
+<h1>CCS Plan Comparison</h1>
+<div class="meta">
+  ${plans.map(p => esc(p.name)).join(" vs ")} ·
+  Generated: ${new Date().toISOString().slice(0, 19).replace("T", " ")}
+</div>
+<h2>Headline numbers</h2>
+<table>
+  <thead><tr><th>Plan</th><th class="num">Budget</th><th class="num">Impressions</th>
+    <th class="num">Net Reach %</th><th class="num">Frequency</th><th class="num">GRP</th></tr></thead>
+  <tbody>${heroRows}</tbody>
+  <tfoot><tr class="agg"><td>Δ (last − first)</td>
+    <td class="num">${Math.round(delta.total_budget_twd || 0).toLocaleString()}</td>
+    <td class="num">${Math.round(delta.total_impressions || 0).toLocaleString()}</td>
+    <td class="num">${(delta.net_reach_pct || 0).toFixed(2)}</td>
+    <td class="num">${(delta.frequency || 0).toFixed(2)}</td>
+    <td class="num">—</td></tr></tfoot>
+</table>
+<h2>Charts</h2>
+<div class="grid">
+  ${imgTag("summary",   "Performance summary")}
+  ${imgTag("budget",    "Budget per channel")}
+  ${imgTag("reach",     "Reach / Attentive / Engagement")}
+  ${imgTag("frequency", "Frequency distribution (1+ … 10+)")}
+  ${imgTag("weekly",    "Weekly GRP")}
+</div>
+<h2>Plan breakdowns</h2>
+${planTables}
+<p class="footer">Generated by CCS Planner Agent · self-contained comparison bundle.</p>
+</body></html>`;
+}
+
+const _REPORT_CSS = `
+body{font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+     color:#111827;max-width:1080px;margin:24px auto;padding:0 24px}
+h1{margin:0 0 8px;font-size:22px}
+h2{margin:24px 0 8px;font-size:18px}
+h3{margin:18px 0 6px;font-size:15px;color:#374151}
+.meta{color:#6B7280;font-size:13px;margin-bottom:18px}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}
+th,td{border:1px solid #E5E7EB;padding:6px 10px;text-align:right}
+th:first-child,td:first-child{text-align:left}
+thead{background:#F9FAFB}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.agg{font-weight:600;background:#F6F8FA}
+.kpi{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
+.kpi-cell{background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;
+          padding:8px 14px;min-width:140px}
+.kpi-cell b{display:block;font-size:18px}
+.kpi-cell span{color:#6B7280;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));
+      gap:18px;margin-top:12px}
+figure{margin:0;background:#fff;border:1px solid #E5E7EB;border-radius:10px;padding:10px}
+figcaption{font-weight:600;margin-bottom:6px}
+img{width:100%;height:auto;display:block}
+.footer{color:#6B7280;font-size:11px;margin-top:24px}
+@media print{body{margin:0;padding:0}.grid{display:block}figure{page-break-inside:avoid}}
+`;
+
+function _buildSingleReadme(plan) {
+  return `CCS Plan Bundle — ${plan.name || "plan"}
+${"=".repeat(60)}
+Generated by CCS Planner Agent at ${new Date().toISOString()}
+
+Contents:
+  report.html            — Self-contained HTML report (open in any browser)
+  charts/                — Each dashboard chart as a PNG
+    summary.png          · Net Reach / Attention / Engagement / Frequency / Brand
+    budget.png           · Budget split per channel
+    frequency.png        · Reach curve at 1+ through 10+ frequency
+    weekly.png           · GRP by week
+  data/plan.json         — Raw plan record (summary + channel allocations)
+  data/augmented.json    — Derived stats (frequency_distribution, duplication, weekly_grp)
+
+To share this bundle, just send the whole folder — the HTML embeds every
+chart as a data URI so it works offline. To print to PDF, open report.html
+and press Cmd-P (macOS) / Ctrl-P (Windows).
+`;
+}
+
+function _buildCompareReadme(payload) {
+  const plans = payload.plans || [];
+  return `CCS Plan Comparison Bundle
+${"=".repeat(60)}
+Generated by CCS Planner Agent at ${new Date().toISOString()}
+Plans compared: ${plans.map(p => p.name).join(", ")}
+
+Contents:
+  report.html            — Self-contained HTML comparison report
+  charts/                — All comparison charts as PNGs
+    summary.png          · Performance summary
+    budget.png           · Budget per channel
+    reach.png            · Reach / Attentive / Engagement
+    frequency.png        · Frequency distribution
+    weekly.png           · Weekly GRP
+  data/plans.json        — Full Compare payload (both plans + delta)
+  data/plan-1.json ...   — Each plan's individual record
+
+To share: just zip up this folder (it's already a zip) — everything is
+self-contained. The HTML embeds every chart as a data URI.
+`;
+}
+
+/* Replace the single-plan Review export button so it produces a ZIP
+ * bundle instead of just the standalone HTML. The HTML fallback still
+ * fires automatically when JSZip fails to load, so offline users aren't
+ * left stranded. */
+const _origRenderReviewV71 = renderReview;
+renderReview = function(msg) {
+  _origRenderReviewV71(msg);
+  // Locate the export button the v7 wrapper injected and relabel +
+  // rewire it to the ZIP flow.
+  requestAnimationFrame(() => {
+    const btn = msg.querySelector("#reviewExportBtn");
+    if (!btn) return;
+    btn.textContent = "📦 一鍵打包下載 (ZIP)";
+    const plan = state.plan;
+    const hostCard = btn.closest(".card");
+    const chartContainer = hostCard ? hostCard.querySelector("div:not(h5):not(h6)") : null;
+    btn.onclick = () => bundlePlanZip(plan, chartContainer ? chartContainer._dashboard : null);
+  });
+};
+
+/* Same relabel for the reports view (成效回顧). */
+const _origRenderPlanReportV71 = renderPlanReport;
+renderPlanReport = async function(plan) {
+  await _origRenderPlanReportV71(plan);
+  requestAnimationFrame(() => {
+    // The v7 wrapper adds a button inside the last bubble; find it by
+    // matching the 📄 icon text. Replace with ZIP flow.
+    const buttons = scroll.querySelectorAll(".bubble.bot:last-child button");
+    buttons.forEach(btn => {
+      if (btn.textContent && btn.textContent.includes("匯出完整報告")) {
+        btn.textContent = "📦 一鍵打包下載 (ZIP)";
+        const hostCard = btn.closest(".card");
+        const chartContainer = hostCard ? hostCard.querySelector("div:not(h5):not(h6)") : null;
+        btn.onclick = () => bundlePlanZip(plan, chartContainer ? chartContainer._dashboard : null);
+      }
+    });
+  });
+};
+
+/* Wire the Compare view: capture Chart instances as they're drawn,
+ * then inject a 📦 bundle button into the comparison card. */
+const _origRenderCompareV71 = renderCompare;
+renderCompare = async function(planIds) {
+  // Monkey-patch the Chart constructor briefly so every draw in the base
+  // renderCompare() records its instance, keyed by the canvas id suffix.
+  const captured = {};
+  const OriginalChart = window.Chart;
+  if (OriginalChart) {
+    window.Chart = class extends OriginalChart {
+      constructor(canvas, cfg) {
+        super(canvas, cfg);
+        // canvas.id looks like "chart-summary", "chart-weekly", etc.
+        const id = canvas && canvas.id ? canvas.id.replace(/^chart-/, "") : "";
+        if (id) captured[id] = this;
+      }
+    };
+  }
+  try {
+    await _origRenderCompareV71(planIds);
+  } finally {
+    window.Chart = OriginalChart;
+  }
+
+  // Fetch the payload again so we have it for the bundle — cheaper than
+  // refactoring the base renderer to expose it.
+  let payload = null;
+  try {
+    const r = await apiFetch("/api/plans/compare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(planIds),
+    });
+    if (r.ok) payload = await r.json();
+  } catch (_) { /* bundle button will be disabled */ }
+  if (!payload) return;
+
+  // Inject a bundle button below the last rendered comparison bubble.
+  const msgNode = scroll.querySelector(".bubble.bot:last-child .msg");
+  if (!msgNode) return;
+
+  const bundleCard = el("div", { class: "card", style: "margin-top:10px" });
+  bundleCard.append(
+    el("h5", { style: "margin-bottom:4px" }, "📦 打包下載比較結果"),
+    el("div", { style: "color:#6B7280;font-size:12px;margin-bottom:8px" },
+      "產出 ZIP：含 HTML 報告、每張圖 PNG、原始 plan 資料 + README。"),
+    el("button", {
+      style: "padding:8px 18px;border:0;background:#111827;color:#fff;" +
+             "border-radius:999px;cursor:pointer;font-weight:600",
+      onclick: () => bundleCompareZip(payload, captured),
+    }, "📦 一鍵打包下載 (ZIP)"),
+  );
+  msgNode.append(bundleCard);
+};
+
 bootApp();
