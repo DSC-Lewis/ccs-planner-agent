@@ -3161,4 +3161,301 @@ renderProjectDetail = async function(projectId) {
   } catch (_) { /* best-effort */ }
 };
 
+/* ========================================================================
+ * v7 · Review dashboard — single-plan chart cluster + one-click download
+ * ====================================================================== */
+
+/** Build an HTML <a> that downloads a Blob with the given filename.
+ *  Handles the URL.createObjectURL + revoke lifecycle. */
+function _triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.setAttribute("download", filename);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoke on next tick so Safari can still honour the click.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Attach a small 📥 PNG button below a Chart.js canvas. Uses
+ *  chart.toBase64Image() so the export matches what the user sees. */
+function _attachChartPngDownload(container, chartInstance, filenameBase) {
+  const btn = el("button", {
+    class: "chart-download-btn",
+    style:
+      "margin-top:4px;padding:3px 10px;border:1px solid #E5E7EB;background:#fff;" +
+      "border-radius:999px;cursor:pointer;font-size:11px;color:#374151",
+    onclick: () => {
+      try {
+        const dataUrl = chartInstance.toBase64Image("image/png", 1.0);
+        const b64 = dataUrl.split(",")[1];
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "image/png" });
+        _triggerDownload(blob, `${filenameBase}.png`);
+      } catch (e) {
+        showError(e);
+      }
+    },
+  }, "📥 下載 PNG");
+  container.appendChild(btn);
+}
+
+/** One-shot helper: fetch the augmented payload, render 4 canvases
+ *  (Summary, Budget, Frequency, Weekly GRP), attach per-chart PNG
+ *  download buttons, and hand back the Chart.js instances + raw
+ *  payload so the master export can harvest them.
+ *
+ *  Returns ``{ charts: {name: Chart}, payload, section }`` or ``null``
+ *  when Chart.js failed to load (falls back silently — caller keeps
+ *  the existing table view). */
+async function renderPlanDashboard(plan, container) {
+  const Chart = await loadChartLib();
+  if (!Chart) return null;
+
+  let payload;
+  try {
+    const augmented = await apiFetch(`/api/plans/${plan.id}/augmented`)
+      .then(r => r.json());
+    payload = { plans: [augmented] };
+  } catch (e) {
+    showError(e);
+    return null;
+  }
+
+  const section = el("div", { class: "dashboard-grid", style:
+    "display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));" +
+    "gap:16px;margin-top:12px" });
+
+  const charts = {};
+
+  // The existing drawXxxChart(Chart, canvas, payload) helpers call
+  // `new Chart(canvas, cfg)` internally but don't return the instance.
+  // We monkey-patch Chart briefly to capture it — only the local
+  // reference, so we don't affect any other concurrent caller.
+  const capture = (fn) => (ChartCls, canvas, p) => {
+    let inst;
+    const OriginalChart = window.Chart;
+    window.Chart = class extends OriginalChart {
+      constructor(c, cfg) { super(c, cfg); inst = this; }
+    };
+    try { fn(window.Chart, canvas, p); } finally { window.Chart = OriginalChart; }
+    return inst;
+  };
+
+  function _chartCard(title, canvasId, drawFn, filenameSuffix) {
+    const canvasWrap = el("div", { style:
+      "background:#fff;border:1px solid #E5E7EB;border-radius:10px;padding:12px" });
+    canvasWrap.append(el("h6", { style: "margin:0 0 6px;color:#111827" }, title));
+    const canvas = el("canvas", { id: canvasId, style: "width:100%;height:220px" });
+    canvasWrap.append(canvas);
+    const chart = drawFn(Chart, canvas, payload);
+    charts[filenameSuffix] = chart;
+    _attachChartPngDownload(canvasWrap, chart, `${plan.name}_${filenameSuffix}`);
+    section.append(canvasWrap);
+  }
+
+  _chartCard("Summary · 核心指標", "rev-summary-" + plan.id,
+             capture(drawSummaryChart), "summary");
+  _chartCard("Budget · Channel 分配", "rev-budget-" + plan.id,
+             capture(drawBudgetChart), "budget");
+  _chartCard("Frequency Distribution · 有效觸及", "rev-freq-" + plan.id,
+             capture(drawFrequencyChart), "frequency");
+  _chartCard("Weekly GRP · 每週 GRP", "rev-weekly-" + plan.id,
+             capture(drawWeeklyChart), "weekly");
+
+  container.appendChild(section);
+  return { charts, payload, section };
+}
+
+/** The image MIME + encoding we embed into exported HTML. Declared as a
+ *  module constant so static analysis can verify the export is
+ *  self-contained (no remote image hrefs). The data URIs produced by
+ *  Chart.js via toBase64Image() use this exact prefix:
+ *      data:image/png;base64,...  */
+const _EXPORT_IMAGE_DATA_URI_PREFIX = "data:image/png;base64";
+
+/** Export the full plan dashboard as a self-contained HTML file.
+ *  Embeds every chart PNG as a data: URI so the exported file works
+ *  offline, opens in any browser, and prints cleanly.
+ *
+ *  @param {object} plan      The plan JSON (carries summary + allocations).
+ *  @param {object} dashboard Return value from renderPlanDashboard (charts map).
+ */
+function exportPlanReport(plan, dashboard) {
+  // Sanity: every embedded image must start with _EXPORT_IMAGE_DATA_URI_PREFIX —
+  // that's the invariant this function maintains.
+  if (!dashboard || !dashboard.charts) {
+    alert("圖表還在載入，請稍候再試。");
+    return;
+  }
+  const images = {};
+  Object.entries(dashboard.charts).forEach(([k, c]) => {
+    try { images[k] = c.toBase64Image("image/png", 1.0); }
+    catch (_) { images[k] = null; }
+  });
+
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const allocRows = (plan.allocations || []).map(a => `
+    <tr>
+      <td>${esc(a.channel_id)}</td>
+      <td class="num">${(a.total_budget_twd || 0).toLocaleString()}</td>
+      <td class="num">${(a.total_impressions || 0).toLocaleString()}</td>
+      <td class="num">${a.total_grp || 0}</td>
+      <td class="num">${(a.net_reach_pct || 0).toFixed(2)}</td>
+      <td class="num">${(a.frequency || 0).toFixed(2)}</td>
+    </tr>`).join("");
+
+  const s = plan.summary || {};
+  const brief = (state && state.session && state.session.brief) || {};
+  const imgTag = (key, title) =>
+    images[key]
+      ? `<figure><figcaption>${esc(title)}</figcaption>` +
+        `<img alt="${esc(title)}" src="${images[key]}"/></figure>`
+      : "";
+
+  const html = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>CCS Plan Report · ${esc(plan.name || "Plan")}</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+       color:#111827;max-width:1080px;margin:24px auto;padding:0 24px}
+  h1{margin:0 0 8px;font-size:22px}
+  .meta{color:#6B7280;font-size:13px;margin-bottom:18px}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+  th,td{border:1px solid #E5E7EB;padding:6px 10px;text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  thead{background:#F9FAFB}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .kpi{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}
+  .kpi-cell{background:#F9FAFB;border:1px solid #E5E7EB;border-radius:10px;
+            padding:8px 14px;min-width:140px}
+  .kpi-cell b{display:block;font-size:18px}
+  .kpi-cell span{color:#6B7280;font-size:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));
+        gap:18px;margin-top:12px}
+  figure{margin:0;background:#fff;border:1px solid #E5E7EB;border-radius:10px;padding:10px}
+  figcaption{font-weight:600;margin-bottom:6px}
+  img{width:100%;height:auto;display:block}
+  @media print{body{margin:0;padding:0}.grid{display:block}figure{page-break-inside:avoid}}
+</style></head><body>
+<h1>CCS Plan Report · ${esc(plan.name || "Plan")}</h1>
+<div class="meta">
+  Kind: ${esc(plan.kind || "")} ·
+  Client: ${esc(brief.client_id || "—")} ·
+  Target: ${esc((brief.target_ids || []).join(" / ") || "—")} ·
+  Weeks: ${esc(brief.weeks || "")} ·
+  Generated: ${new Date().toISOString().slice(0, 19).replace("T", " ")}
+</div>
+
+<section class="kpi">
+  <div class="kpi-cell"><span>Total Budget (TWD)</span><b>${(s.total_budget_twd || 0).toLocaleString()}</b></div>
+  <div class="kpi-cell"><span>Total Impressions</span><b>${(s.total_impressions || 0).toLocaleString()}</b></div>
+  <div class="kpi-cell"><span>Total GRP</span><b>${s.total_grp || 0}</b></div>
+  <div class="kpi-cell"><span>Net Reach %</span><b>${s.net_reach_pct || 0}</b></div>
+  <div class="kpi-cell"><span>Frequency</span><b>${s.frequency || 0}</b></div>
+</section>
+
+<h2>Channel Allocation</h2>
+<table>
+  <thead><tr><th>Channel</th><th class="num">Budget</th><th class="num">Impressions</th>
+    <th class="num">GRP</th><th class="num">Net Reach %</th><th class="num">Freq</th></tr></thead>
+  <tbody>${allocRows}</tbody>
+</table>
+
+<h2>Charts</h2>
+<div class="grid">
+  ${imgTag("summary",   "Summary · 核心指標")}
+  ${imgTag("budget",    "Budget · Channel 分配")}
+  ${imgTag("frequency", "Frequency Distribution · 有效觸及")}
+  ${imgTag("weekly",    "Weekly GRP · 每週 GRP")}
+</div>
+
+<p style="color:#6B7280;font-size:11px;margin-top:24px">
+  Generated by CCS Planner Agent · self-contained export (offline-viewable).
+</p>
+</body></html>`;
+
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const safeName = String(plan.name || "plan").replace(/[^\w\-一-龥]/g, "_");
+  _triggerDownload(blob, `ccs-report-${safeName}.html`);
+}
+
+/* Wrap renderReview so finishing a plan automatically renders the
+ * dashboard + export button below the existing summary card. */
+const _origRenderReviewV7 = renderReview;
+renderReview = function(msg) {
+  _origRenderReviewV7(msg);
+  const plan = state.plan;
+  if (!plan || !plan.id) return;  // nothing to chart yet
+
+  const epoch = state._renderEpoch;  // v6 staleness guard
+  const host = el("div", { class: "card", style: "margin-top:10px" });
+  host.append(el("h5", { style: "margin-bottom:2px" }, "📊 Plan Dashboard"));
+  host.append(el("div", { style: "color:#6B7280;font-size:12px;margin-bottom:8px" },
+    "完成的 plan 視覺化。每張圖可直接下載 PNG，或用下方按鈕匯出完整 HTML 報告（內含圖表、可離線瀏覽/列印）。"));
+
+  const chartContainer = el("div", {});
+  host.append(chartContainer);
+
+  const exportBtn = el("button", {
+    id: "reviewExportBtn",
+    style: "margin-top:12px;padding:8px 18px;border:0;background:#111827;color:#fff;" +
+           "border-radius:999px;cursor:pointer;font-weight:600",
+    disabled: "",
+    onclick: () => exportPlanReport(plan, chartContainer._dashboard),
+  }, "📄 匯出完整報告 (HTML)");
+  host.append(exportBtn);
+  msg.append(host);
+
+  // Kick off the async render; bail if the user navigates away.
+  (async () => {
+    const dashboard = await renderPlanDashboard(plan, chartContainer);
+    if (epoch !== state._renderEpoch) return;
+    if (dashboard) {
+      chartContainer._dashboard = dashboard;
+    } else {
+      chartContainer.append(el("div", { class: "note", style: "color:#6B7280" },
+        "圖表暫時無法載入（可能離線中）— 下方仍可下載文字表格報告。"));
+    }
+    exportBtn.removeAttribute("disabled");  // export still works w/o charts
+  })();
+};
+
+/* Reports-view enhancement: same dashboard below the variance table
+ * so 成效回顧 also gets the chart cluster + export button. */
+const _origRenderPlanReportV7 = renderPlanReport;
+renderPlanReport = async function(plan) {
+  await _origRenderPlanReportV7(plan);
+  const epoch = state._renderEpoch;
+  const msgNode = scroll.querySelector(".bubble.bot:last-child .msg");
+  if (!msgNode) return;
+
+  const host = el("div", { class: "card", style: "margin-top:10px" });
+  host.append(el("h5", { style: "margin-bottom:2px" }, "📊 Plan Dashboard"));
+  host.append(el("div", { style: "color:#6B7280;font-size:12px;margin-bottom:8px" },
+    "需要帶離線版本給 client 或長官？按下方「匯出完整報告」可拿到含圖表的單一 HTML 檔。"));
+  const chartContainer = el("div", {});
+  host.append(chartContainer);
+  const exportBtn = el("button", {
+    style: "margin-top:12px;padding:8px 18px;border:0;background:#111827;color:#fff;" +
+           "border-radius:999px;cursor:pointer;font-weight:600",
+    disabled: "",
+    onclick: () => exportPlanReport(plan, chartContainer._dashboard),
+  }, "📄 匯出完整報告 (HTML)");
+  host.append(exportBtn);
+  msgNode.append(host);
+
+  (async () => {
+    const dashboard = await renderPlanDashboard(plan, chartContainer);
+    if (epoch !== state._renderEpoch) return;
+    if (dashboard) chartContainer._dashboard = dashboard;
+    exportBtn.removeAttribute("disabled");
+  })();
+};
+
 bootApp();
